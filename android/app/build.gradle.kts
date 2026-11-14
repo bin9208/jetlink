@@ -30,12 +30,13 @@ android {
     ndkVersion = "30.0.16248370"
 
     defaultConfig {
-        applicationId = "io.zoompilot.jetlink.android"
+        // carrot fork: installs beside the original app, signed with its own key
+        applicationId = "io.zoompilot.jetlink.android.carrot"
         // Android 12: Build.SOC_MODEL and the performance hint API.
         minSdk = 31
         targetSdk = 36
         versionCode = jetlinkVersionCode
-        versionName = jetlinkVersion
+        versionName = "$jetlinkVersion-carrot.1"
         // The QNN runtime is arm64 only, and so is every Snapdragon with an NPU
         // worth driving on. The emulator on an Apple silicon Mac is arm64 too.
         ndk { abiFilters += "arm64-v8a" }
