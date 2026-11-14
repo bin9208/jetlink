@@ -14,6 +14,10 @@ public enum ModelConstants {
   public static let hiddenState = "hidden_state"
   /// The input only a stateful graph (openpilot #38916) has.
   public static let statefulFrame = "new_img"
+  /// carrot's N16: the route map (1, 1, 256, 256), uint8 on the wire.
+  public static let navMap = "nav_map"
+  /// carrot's N16: the next maneuver (1, 47), in the packed floats.
+  public static let navigation = "navigation"
   public static let stateOutputPrefix = "next_"
 }
 
@@ -154,8 +158,10 @@ public struct ModelSpec: Sendable, Equatable {
       NamedShape("action_t", input("action_t") ?? []),
     ]
     if stateful {
-      // the pulse is the graph's own input
-      return [NamedShape("desire", [(input("desire") ?? []).reduce(1, *)])] + scalars
+      // the pulse is the graph's own input; a navigation graph (carrot's
+      // N16) takes its maneuver floats after the scalars
+      let navigation = input(ModelConstants.navigation).map { [NamedShape(ModelConstants.navigation, $0)] } ?? []
+      return [NamedShape("desire", [(input("desire") ?? []).reduce(1, *)])] + scalars + navigation
     }
     let dp = input("desire_pulse") ?? [0, 0, 0]
     return [NamedShape("desire", [dp.count > 2 ? dp[2] : 0])] + scalars
@@ -211,6 +217,8 @@ public struct ModelSpec: Sendable, Equatable {
   // MARK: wire sizes
 
   public var inferReqBytes: Int { Wire.inferReqSize + warpedBytes + packedBytes }
+  /// A navigation graph's route map, sent only with Flag.navMap.
+  public var navMapBytes: Int { input(ModelConstants.navMap).map { $0.reduce(1, *) } ?? 0 }
   /// Without telemetry; Flag.wantHidden adds hidden_state back.
   public var inferRespBytes: Int { Wire.inferRespSize + replyCount * 4 }
 

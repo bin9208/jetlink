@@ -75,6 +75,9 @@ public enum Wire {
     /// On INFER_REQ: keep hidden_state in the response, for a comma logging
     /// the whole output vector.
     public static let wantHidden = Flag(rawValue: 1 << 2)
+    /// On INFER_REQ to a navigation graph (carrot's N16): a new uint8 256x256
+    /// route map follows the packed floats. Without it the last map stays.
+    public static let navMap = Flag(rawValue: 1 << 3)
     /// One pad byte follows the payload; see packetMultiple.
     public static let padded = Flag(rawValue: 1 << 7)
   }

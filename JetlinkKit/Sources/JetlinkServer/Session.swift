@@ -460,14 +460,17 @@ final class Session: @unchecked Sendable {
     let started = DispatchTime.now().uptimeNanoseconds
     host.lastSeenAt = ProcessInfo.processInfo.systemUptime
     let layout = loaded.staging.layout
-    guard message.payload.count == layout.requestBytes else {
+    guard message.payload.count >= Wire.inferReqSize else { return InferReply(status: .badShape) }
+    let base = message.payload.baseAddress!
+    let frameID = UInt32(littleEndian: base.loadUnaligned(as: UInt32.self))
+    let flags = Wire.Flag(rawValue: UInt32(littleEndian: base.loadUnaligned(fromByteOffset: 4, as: UInt32.self)))
+    // A route map rides only on a navigation graph's frames that carry a new one.
+    let withMap = flags.contains(.navMap) && layout.navMapBytes > 0
+    guard message.payload.count == layout.requestBytes + (withMap ? layout.navMapBytes : 0) else {
       // The offsets below come from the spec, not the wire: a client on
       // another model would have its scalars read out of the image.
       return InferReply(status: .badShape)
     }
-    let base = message.payload.baseAddress!
-    let frameID = UInt32(littleEndian: base.loadUnaligned(as: UInt32.self))
-    let flags = Wire.Flag(rawValue: UInt32(littleEndian: base.loadUnaligned(fromByteOffset: 4, as: UInt32.self)))
     if flags.contains(.resetQueues) {
       loaded.staging.reset()
     }
@@ -480,6 +483,9 @@ final class Session: @unchecked Sendable {
       // The packed floats stay where they arrived: every cast and copy of
       // them reads unaligned, so they need no aligned copy first.
       try loaded.staging.stage(warped: warped, packed: warped + layout.warpedBytes)
+      if withMap {
+        loaded.staging.stage(navMap: base + layout.requestBytes)
+      }
       queueUs = microseconds(since: started)
       try loaded.engine.run()
     } catch {

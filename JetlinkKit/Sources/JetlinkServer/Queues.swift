@@ -123,6 +123,13 @@ protocol FrameStaging: AnyObject {
   /// the next frame feeds back. Never after NOT_FINITE or a failed run:
   /// modeld fed back only what reached it, and those raise on the comma first.
   func keep(outputs: UnsafeRawPointer, type: ElementType)
+  /// A navigation graph's new route map (uint8, FrameLayout.navMapBytes).
+  /// Kept in the engine's input until the next one or a reset.
+  func stage(navMap: UnsafeRawPointer)
+}
+
+extension FrameStaging {
+  func stage(navMap: UnsafeRawPointer) {}
 }
 
 /// A model's INFER_REQ and reply as the session handles them, from the spec
@@ -132,6 +139,8 @@ struct FrameLayout {
   /// INFER_REQ's payload: the request head, the warped frame, the packed floats.
   let requestBytes: Int
   let warpedBytes: Int
+  /// A navigation graph's route map, appended with Flag.navMap; 0 otherwise.
+  let navMapBytes: Int
   /// The driving output, float32 on the wire whatever the engine gives, and
   /// where the engine writes it, which stays put from load to close.
   let outputCount: Int
@@ -143,6 +152,7 @@ struct FrameLayout {
   init(spec: ModelSpec, engine: any Engine) {
     requestBytes = spec.inferReqBytes
     warpedBytes = spec.warpedBytes
+    navMapBytes = spec.navMapBytes
     outputCount = spec.outputCount
     outputType = engine.outputs[ModelConstants.drivingOutput]?.type
     output = engine.output(ModelConstants.drivingOutput)
@@ -304,6 +314,8 @@ final class StateLoop: FrameStaging {
   /// an engine that casts on the device.
   private let frame: StagingTarget
   private let scalars: [(offset: Int, count: Int, target: StagingTarget)]
+  /// carrot's N16 route map, when the graph takes one.
+  private let navMap: StagingTarget?
 
   init(spec: ModelSpec, engine: any Engine) throws {
     self.engine = engine
@@ -317,10 +329,24 @@ final class StateLoop: FrameStaging {
     try engine.loopState(pairs)
     frame = try StagingTarget(engine, ModelConstants.statefulFrame)
     scalars = try spec.packedLayout.map { ($0.range.lowerBound * 4, $0.range.count, try StagingTarget(engine, $0.name)) }
+    navMap = spec.navMapBytes > 0 ? try StagingTarget(engine, ModelConstants.navMap) : nil
+    clearNavMap()
   }
 
   func reset() {
     engine.resetState()
+    clearNavMap()
+  }
+
+  func stage(navMap map: UnsafeRawPointer) {
+    guard let navMap else { return }
+    Stage.store(u8: map, count: layout.navMapBytes, into: navMap.pointer, as: navMap.type)
+  }
+
+  /// No route until the comma sends one: the graph saw zeros in training.
+  private func clearNavMap() {
+    guard let navMap else { return }
+    navMap.pointer.initializeMemory(as: UInt8.self, repeating: 0, count: layout.navMapBytes * navMap.type.size)
   }
 
   /// Nothing: the graph's state is not the client's; RESET_QUEUES clears it.
