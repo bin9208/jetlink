@@ -287,7 +287,7 @@ import Testing
     #expect(maxError(out["g3"]!, gemm({ wT[$1 * 64 + $0] }, { full[$0 * 32 + $1] })) < 1e-4)
   }
 
-  @Test func matmulIsBatchMatmul() throws {
+  @Test func matmulByAConstantIsFullyConnected() throws {
     var v = SeededValues(seed: 12)
     let x = v(2 * 3 * 5)
     let w = v(5 * 4)
@@ -303,9 +303,17 @@ import Testing
     g.output("xw", Self.f32, [2, 3, 4])
     g.output("qk", Self.f32, [1, 2, 3, 3])
     let (file, _) = try g.convert()
-    #expect(file.count("BATCH_MATMUL") == 2)
-    // k is lifted to q's rank; the constant keeps [K, N].
-    #expect(file.count("RESHAPE") == 1)
+    // A constant right-hand side is a FULLY_CONNECTED on x flattened to
+    // [6, 5], its weight transposed to [N, K], reshaped back to [2, 3, 4];
+    // k is lifted to q's rank. Every BATCH_MATMUL's inputs share a rank,
+    // which MediaTek's NeuroPilot requires.
+    #expect(file.count("BATCH_MATMUL") == 1)
+    #expect(file.count("FULLY_CONNECTED") == 1)
+    #expect(file.count("RESHAPE") == 3)
+    let fc = try #require(file.operators.first { $0.op == "FULLY_CONNECTED" })
+    #expect(file.tensors[fc.inputs[0]].shape == [6, 5] && file.tensors[fc.inputs[1]].shape == [4, 5])
+    let bmm = try #require(file.operators.first { $0.op == "BATCH_MATMUL" })
+    #expect(file.tensors[bmm.inputs[0]].shape.count == file.tensors[bmm.inputs[1]].shape.count)
     let out = try Self.run(file, ["x": x, "q": q, "k": k])
     let xw = (0..<24).map { (e: Int) -> Float in Self.sum(5) { x[(e / 4) * 5 + $0] * w[$0 * 4 + e % 4] } }
     let qk = (0..<18).map { (e: Int) -> Float in
@@ -667,13 +675,15 @@ import Testing
     let deq = try #require(file.operators.first { $0.op == "DEQUANTIZE" })
     #expect(deq.version == 3 && file.operators.first?.op == "DEQUANTIZE")
     let narrow = file.tensors[deq.inputs[0]]
-    #expect(narrow.type == TFLite.TensorType.float16.rawValue && narrow.shape == [64, 32])
+    // the MatMul's weight, transposed to FULLY_CONNECTED's [N, K]
+    #expect(narrow.type == TFLite.TensorType.float16.rawValue && narrow.shape == [32, 64])
     guard case .external(let offset, let size) = file.buffers[narrow.buffer] else {
       Issue.record("the fp16 weight is not after the flatbuffer: \(file.buffers[narrow.buffer])")
       return
     }
     #expect(offset % 64 == 0 && offset >= report.flatbufferBytes && size == 64 * 32 * 2)
-    #expect(file.data(deq.inputs[0]) == Elements.encode(w, as: DataType.float16))
+    let wT = (0..<32).flatMap { j in (0..<64).map { w[$0 * 32 + j] } }
+    #expect(file.data(deq.inputs[0]) == Elements.encode(wT, as: DataType.float16))
     let add = try #require(file.operators.first { $0.op == "ADD" })
     let bias = file.tensors[add.inputs[1]]
     #expect(bias.type == TFLite.TensorType.float32.rawValue)

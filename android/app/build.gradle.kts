@@ -23,7 +23,7 @@ val jetlinkVersionCode: Int =
         .let { (it.getOrElse(0) { 0 } * 10000) + (it.getOrElse(1) { 0 } * 100) + it.getOrElse(2) { 0 } }
 
 /** Jetlink Carrot's build of this upstream version (bin9208/jetlink releases). */
-val carrotBuild = 7
+val carrotBuild = 8
 
 android {
     namespace = "io.zoompilot.jetlink"

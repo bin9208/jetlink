@@ -77,8 +77,9 @@ public enum LiteRtProfile: String, CaseIterable, Sendable {
 /// conversion writes it for a G5.
 public final class LiteRtBackend: EngineBackend {
   /// What JetlinkONNX's LiteRTPreparation writes now: an artifact converted
-  /// under another version rebuilds.
-  static let conversionVersion = 1
+  /// under another version rebuilds. 2: a MatMul by a constant is a
+  /// FULLY_CONNECTED (MediaTek's NeuroPilot refused the BATCH_MATMUL).
+  static let conversionVersion = 2
 
   /// How the NPU's compile is set up, kept with an artifact built for the
   /// NPU's profile. 1: LiteRT sees only the phone's vendor's compiler plugin

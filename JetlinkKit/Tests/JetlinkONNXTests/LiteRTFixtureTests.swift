@@ -136,4 +136,21 @@ import Testing
     let out = try interpreter.run(inputs)
     #expect(out.values.allSatisfy { $0.allSatisfy(\.isFinite) })
   }
+
+  /// A real model converted on request: JETLINK_LITERT_PREPARE=<model.onnx>.
+  /// Every BATCH_MATMUL's two inputs share a rank of 2 to 4, which MediaTek's
+  /// NeuroPilot requires: one that does not fails the APU's whole module.
+  @Test(.enabled(if: ProcessInfo.processInfo.environment["JETLINK_LITERT_PREPARE"] != nil))
+  func aRealModelsMatmulsSuitTheAPU() throws {
+    let model = URL(fileURLWithPath: ProcessInfo.processInfo.environment["JETLINK_LITERT_PREPARE"]!)
+    let (file, report) = try Self.convert(model)
+    print("converted \(model.lastPathComponent): \(report.summary)")
+    var ops: [String: Int] = [:]
+    for o in file.operators { ops[o.op, default: 0] += 1 }
+    print("operators: \(ops.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))")
+    for o in file.operators where o.op == "BATCH_MATMUL" {
+      let ranks = o.inputs.prefix(2).map { file.tensors[$0].shape.count }
+      #expect(ranks[0] == ranks[1] && (2...4).contains(ranks[0]), "\(file.tensors[o.outputs[0]].name): input ranks \(ranks)")
+    }
+  }
 }

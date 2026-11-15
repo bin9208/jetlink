@@ -967,12 +967,48 @@ extension LiteRTLowering {
     guard da[da.count - 1] == db[db.count - 2] else { throw OnnxError("MatMul of \(da) and \(db)") }
     let batch = try Self.broadcast(Array(da.dropLast(2)), Array(db.dropLast(2)))
     let out = batch + [da[da.count - 2], db[db.count - 1]]
-    // A constant right-hand side stays [K, N]; run-time operands share a rank.
+    if case .constant(let w) = b, try matmulAsFullyConnected(n, a, w, out) {
+      return
+    }
+    // Run-time operands share a rank.
     let rank = max(da.count, db.count)
     let ta = try operand(a, rank: rank, "\(n.outputs[0])__lhs")
     let tb = try operand(b, rank: rank, "\(n.outputs[0])__rhs")
     let o = try define(n.outputs[0], out, .float32)
     emit(.batchMatmul, [ta, tb], [o], .batchMatmul(adjX: false, adjY: false))
+  }
+
+  /// A MatMul by a constant [K, N] (leading 1s allowed) as a
+  /// FULLY_CONNECTED on the left side flattened to [M, K], reshaped back to
+  /// `out`. A BATCH_MATMUL of a rank-3 or rank-4 left side and a rank-2
+  /// constant is what TFLite's GPU takes, but MediaTek's NeuroPilot refuses
+  /// it ("BatchMatMulLayer: input rank is invalid"), and one refused op
+  /// fails the whole module there: Light Speed 2 had 116 of them and the
+  /// APU took none of its 2483 ops. FULLY_CONNECTED is what an NPU runs a
+  /// linear layer as anyway. False, with nothing emitted, for a weight of
+  /// another element type or with a real batch.
+  private mutating func matmulAsFullyConnected(_ n: Node, _ a: Value, _ w: Constant, _ out: [Int]) throws -> Bool {
+    guard w.type == DataType.float || w.type == DataType.float16, w.dims.dropLast(2).allSatisfy({ $0 == 1 }) else { return false }
+    let name = n.outputs[0]
+    let (k, units) = (w.dims[w.dims.count - 2], w.dims[w.dims.count - 1])
+    var weight2D = w
+    weight2D.dims = [k, units]
+    let weight = try transposedWeight(weight2D, rows: k, cols: units, "\(w.name)__t")
+    let x = try tensor(a)
+    let shape = model.tensors[x].shape
+    let rows = shape.dropLast().reduce(1, *)
+    let flat = shape.count == 2 ? x : reshaped(x, [rows, k], "\(name)__flat")
+    if out == [rows, units] {
+      let o = try define(name, out, .float32)
+      emit(.fullyConnected, [flat, weight, -1], [o], .fullyConnected(keepNumDims: false))
+    } else {
+      let fc = addTensor("\(name)__fc", [rows, units], .float32)
+      emit(.fullyConnected, [flat, weight, -1], [fc], .fullyConnected(keepNumDims: false))
+      let o = try define(name, out, .float32)
+      emit(.reshape, [fc, int32Tensor(out, "\(name)__shape")], [o], .reshape(newShape: out.map { Int32($0) }))
+    }
+    count("MatMuls by a constant as FULLY_CONNECTED")
+    return true
   }
 
   mutating func gemm(_ n: Node) throws {
@@ -1030,7 +1066,10 @@ extension LiteRTLowering {
   /// A 2-D weight's transpose, made block by block when the file is written.
   private mutating func transposedWeight(_ w: Constant, rows: Int, cols: Int, _ name: String) throws -> Int {
     let size = try Self.elementSize(w)
-    if w.type == DataType.float16 && w.count < Self.fp16MinElements {
+    // A small one, fp16 widened to FLOAT32 or an fp32 one small enough to
+    // sit in the flatbuffer, is made here: a buffer in the flatbuffer
+    // cannot be transposed as the file is written.
+    if w.count < Self.fp16MinElements {
       let values = try floats(w)
       return floatTensor((0..<cols).flatMap { j in (0..<rows).map { values[$0 * cols + j] } }, [cols, rows], name)
     }
