@@ -80,6 +80,14 @@ public final class LiteRtBackend: EngineBackend {
   /// under another version rebuilds.
   static let conversionVersion = 1
 
+  /// How the NPU's compile is set up, kept with an artifact built for the
+  /// NPU's profile. 1: LiteRT sees only the phone's vendor's compiler plugin
+  /// (jl_litert.c, vendor_libraries); before it, Google Tensor's plugin took
+  /// a MediaTek phone's model and left the MediaTek plugin nothing it could
+  /// compile. A build that fell back to the GPU under an older setup is
+  /// built again, so the NPU gets its first real try.
+  static let npuSetupVersion = 1
+
   public let name = "litert"
   /// A directory: the converted model and the GPU's compile cache.
   public let suffix = ".litertcache"
@@ -271,6 +279,9 @@ public final class LiteRtBackend: EngineBackend {
         refusal = copyLiteRtLog(since: compileStarted)
       }
       var meta = LiteRtArtifact.meta(self, model: model, started: started)
+      if profile == .npu {
+        meta["npu_setup"] = LiteRtBackend.npuSetupVersion
+      }
       if profile == .npu && hardware != .npu {
         // Kept with the artifact: every later load says again why the NPU
         // choice runs on the GPU, not only this build.
@@ -297,6 +308,9 @@ public final class LiteRtBackend: EngineBackend {
     // What the build found runs the model: the NPU, or for the NPU's profile
     // the GPU when it could not take it, which a load does not ask again.
     let target = profile == .npu && meta["hardware"] as? String != LiteRtProfile.npu.rawValue ? .gpu : profile
+    if profile == .npu && target != .npu && ((meta["npu_setup"] as? NSNumber)?.intValue ?? 0) < LiteRtBackend.npuSetupVersion {
+      throw ArtifactInvalid("\(artifact.lastPathComponent): the NPU refused it under an older setup of its compiler plugins; building again for the NPU")
+    }
     // LiteRT reads the compiled model back rather than compile again. A load
     // that never finished prepares the model again, whose own compile is
     // marked: one that got the app killed then leaves the NPU to the GPU.

@@ -1,12 +1,15 @@
 #include "jl_litert.h"
 
 #include <dlfcn.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "litert/c/internal/litert_accelerator.h"
 #include "litert/c/internal/litert_logging.h"
@@ -330,25 +333,94 @@ static char *mediatek_toml(void) {
   return format("neron_sdk_version = %d\nperformance_mode = %d\n", 1, 1);
 }
 
-// An environment for one model on an NPU: LiteRT finds the vendor's dispatch
-// library and compiler plugin in the directory it was opened from, and keeps
-// the model it compiles in `cache_dir`, where the next load finds it. LiteRT
-// keys that copy by the model's bytes, the options and the phone's build
-// fingerprint, so a system update compiles again.
-static char *npu_environment(const char *cache_dir, LiteRtEnvironment *out) {
+// LiteRT's libraries for one vendor's NPU, as they are named beside
+// libLiteRt.
+static const char *const google_tensor_libraries[] = {"libLiteRtDispatch_GoogleTensor.so",
+                                                      "libLiteRtCompilerPlugin_google_tensor.so"};
+static const char *const mediatek_libraries[] = {"libLiteRtDispatch_MediaTek.so", "libLiteRtCompilerPlugin_MediaTek.so"};
+
+// A directory beside `cache_dir` that holds only `vendor`'s dispatch library
+// and compiler plugin, as links to the ones beside libLiteRt. LiteRT takes
+// every compiler plugin in the directory it is given and applies them in
+// turn (compiler_plugin.cc, ApplyPlugins), and a plugin's partition outlines
+// the ops it claims before its compile runs: on a MediaTek phone Google
+// Tensor's plugin claimed the whole model, failed to compile it, and left
+// the MediaTek plugin a single op it could not take, so the NPU never saw
+// the model. The dispatch library is the first one found, so it is kept to
+// the vendor's too. The links are made again on every load, as an app
+// update moves the directory they point into.
+static char *vendor_libraries(const char *cache_dir, int vendor, char **out) {
+  *out = NULL;
+  size_t n = strlen(cache_dir);
+  while (n > 1 && cache_dir[n - 1] == '/') {
+    n--;
+  }
+  while (n > 0 && cache_dir[n - 1] != '/') {
+    n--;
+  }
+  char *dir = format("%.*snpu-libraries", (int)n, cache_dir);
+  if (dir == NULL) {
+    return copy("out of memory");
+  }
+  if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
+    char *error = format("could not make %s for the NPU's libraries: %s", dir, strerror(errno));
+    free(dir);
+    return error;
+  }
+  const char *const *libraries[] = {google_tensor_libraries, mediatek_libraries};
+  for (int v = 0; v < 2; v++) {
+    for (int i = 0; i < 2; i++) {
+      const char *name = libraries[v][i];
+      char *link = format("%s/%s", dir, name);
+      char *target = format("%s/%s", runtime_dir, name);
+      char *error = NULL;
+      if (link == NULL || target == NULL) {
+        error = copy("out of memory");
+      } else if (unlink(link) != 0 && errno != ENOENT) {
+        error = format("could not remove %s: %s", link, strerror(errno));
+      } else if ((v == JL_LITERT_NPU_MEDIATEK) == (vendor == JL_LITERT_NPU_MEDIATEK) && symlink(target, link) != 0) {
+        error = format("could not link %s to %s: %s", link, target, strerror(errno));
+      }
+      free(link);
+      free(target);
+      if (error != NULL) {
+        free(dir);
+        return error;
+      }
+    }
+  }
+  *out = dir;
+  return NULL;
+}
+
+// An environment for one model on an NPU: LiteRT finds `vendor`'s dispatch
+// library and compiler plugin in a directory of their own
+// (vendor_libraries), and keeps the model it compiles in `cache_dir`, where
+// the next load finds it. LiteRT keys that copy by the model's bytes, the
+// options and the phone's build fingerprint, so a system update compiles
+// again.
+static char *npu_environment(const char *cache_dir, int vendor, LiteRtEnvironment *out) {
   if (runtime_dir == NULL) {
     return copy("an NPU's libraries are looked for in the directory LiteRT was opened from, and it was opened from the loader's path");
+  }
+  char *libraries = NULL;
+  char *error = vendor_libraries(cache_dir, vendor, &libraries);
+  if (error != NULL) {
+    return error;
   }
   LiteRtEnvOption options[] = {
       {kLiteRtEnvOptionTagAutoRegisterAccelerators, {.type = kLiteRtAnyTypeInt}},
       {kLiteRtEnvOptionTagRuntimeLibraryDir, {.type = kLiteRtAnyTypeString, .str_value = runtime_dir}},
-      {kLiteRtEnvOptionTagDispatchLibraryDir, {.type = kLiteRtAnyTypeString, .str_value = runtime_dir}},
-      {kLiteRtEnvOptionTagCompilerPluginLibraryDir, {.type = kLiteRtAnyTypeString, .str_value = runtime_dir}},
+      {kLiteRtEnvOptionTagDispatchLibraryDir, {.type = kLiteRtAnyTypeString, .str_value = libraries}},
+      {kLiteRtEnvOptionTagCompilerPluginLibraryDir, {.type = kLiteRtAnyTypeString, .str_value = libraries}},
       {kLiteRtEnvOptionTagCompilerCacheDir, {.type = kLiteRtAnyTypeString, .str_value = cache_dir}},
   };
   options[0].value.int_value = kLiteRtHwAcceleratorCpu | kLiteRtHwAcceleratorGpu | kLiteRtHwAcceleratorNpu;
-  TRY(LiteRtCreateEnvironment, (int)(sizeof(options) / sizeof(options[0])), options, out);
-  return NULL;
+  // the environment copies its options' strings
+  error = take(lrt.LiteRtCreateEnvironment((int)(sizeof(options) / sizeof(options[0])), options, out),
+               "LiteRtCreateEnvironment");
+  free(libraries);
+  return error;
 }
 
 // The environment `model` runs in.
@@ -442,7 +514,7 @@ static char *compile(jl_litert_model *m, const char *path, const jl_litert_optio
   char *error = NULL;
   if (o->npu_cache_dir != NULL) {
     m->npu_cache_dir = copy(o->npu_cache_dir);
-    error = m->npu_cache_dir != NULL ? npu_environment(m->npu_cache_dir, &m->environment) : copy("out of memory");
+    error = m->npu_cache_dir != NULL ? npu_environment(m->npu_cache_dir, o->npu_vendor, &m->environment) : copy("out of memory");
     if (error != NULL) {
       return error;
     }
