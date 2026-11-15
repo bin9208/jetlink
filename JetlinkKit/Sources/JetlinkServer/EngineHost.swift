@@ -136,12 +136,17 @@ public final class EngineHost: @unchecked Sendable {
   /// Downloads a model the comma lacks too; set once, by the control layer,
   /// before the server starts.
   weak var fetcher: (any ModelFetching)?
+  /// Carrot's auxiliary camera models, when the backend can run them.
+  let aux: AuxHub?
 
   public init(cache: ServerCache, hooks: ServerHooks = ServerHooks()) {
     self.cache = cache
     self.hooks = hooks
     telemetry = TelemetrySampler(source: hooks.telemetry)
     picks = PickStore(layout: cache.layout)
+    aux = cache.backend.aux.map {
+      AuxHub(backend: $0, directory: cache.layout.root.appending(path: "aux", directoryHint: .isDirectory), thermal: hooks.thermal)
+    }
   }
 
   deinit {

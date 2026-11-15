@@ -86,6 +86,26 @@ bench tools). There is one version: update the comma and Jetlink together.
 - **Link power.** On Linux, USB 3 link power management is off on the comma's
   port while a session is served and the comma has sent something in the last
   30 s ([USB speed and power](#bus-speed)).
+- **Carrot auxiliary vision (this fork).** A server whose backend can run
+  them (onnxruntime) says `carrot_aux_v1: true` in its hello reply, and only
+  then does a carrot comma send AUX_* messages: any other server answers an
+  unknown type with an error, which ends the session. Every payload is a
+  little-endian u32 JSON length, the JSON, then raw bytes.
+  `AUX_LOAD` (0x4010, `sha256`, `nbytes`) is answered by `AUX_STATE` (0x4011,
+  `state`: `ready` with `device`, `input`, `outputs`; `need_upload`;
+  `loading`; `failed` with `detail`). `AUX_CHUNK` (0x4012, `sha256`,
+  `offset`, the bytes) uploads a model; the last piece is verified and
+  loaded, and its `AUX_STATE` follows when the load ends. `AUX_REQ`
+  (0x4013, `id`, `sha256`, `outputs`, one float32 input tensor) is answered
+  by `AUX_RESP` (0x4014, `id`, `ok`, `outputs` with shapes, `run_us`, the
+  float32 outputs; or `error`: `shed`, `busy`, `loading`, `not_loaded`,
+  `bad_shape`, `infer_failed`). The comma sends one AUX_* message per frame,
+  right after the driving reply; the server runs the model on its own thread
+  (QNN's GPU on a Snapdragon, so the NPU stays the driving model's, else the
+  CPU provider) and writes the reply from there. It sheds a job while the
+  device is `serious` or `critical` or the last driving frames averaged over
+  35 ms; the comma then runs that one on its own CPU. Models are cached in
+  `<cache>/aux/<sha256>.onnx`.
 
 Measured on the bench Jetson: [performance](status.md#measured-performance).
 

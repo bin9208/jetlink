@@ -82,6 +82,9 @@ public protocol EngineBackend: AnyObject, Sendable {
   func deriveSpec(model: URL, sha256: String, nbytes: Int64, frameSkip: Int) throws -> ModelSpec
   func build(model: URL, artifact: URL, report: @escaping ProgressFn, metaExtra: [String: Any]) throws
   func load(artifact: URL, report: @escaping ProgressFn) throws -> any Engine
+  /// Runs carrot's auxiliary camera models beside the driving model, or nil
+  /// for a backend that cannot (`AuxHub`).
+  var aux: (any AuxBackend)? { get }
 }
 
 extension Engine {
@@ -93,6 +96,8 @@ extension Engine {
 }
 
 extension EngineBackend {
+  public var aux: (any AuxBackend)? { nil }
+
   public func tag() -> String {
     "\(name)\(sanitize(runtimeVersion)).\(deviceTag())"
   }

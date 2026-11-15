@@ -197,7 +197,53 @@ final class Session: @unchecked Sendable {
     case .stateReq: try onState(message)
     case .shutdownReq: try onShutdown(message)
     case .leave: onLeave(message)
+    case .auxLoad, .auxChunk, .auxReq: try onAux(type, message)
     default: try error(message.seq, "unknown_message", "type \(message.msgType)")
+    }
+  }
+
+  // MARK: carrot's auxiliary vision
+
+  /// AUX_* from the comma (`AuxHub`). Replies go out as AUX_STATE and
+  /// AUX_RESP; the outputs are written from the hub's thread, so a large one
+  /// waiting for the comma to read never holds up this loop.
+  private func onAux(_ type: Wire.Msg, _ message: Message) throws {
+    guard let hub = host.aux else {
+      try error(message.seq, "unknown_message", "type \(message.msgType): no auxiliary vision here")
+      return
+    }
+    guard let (json, blob) = AuxPayload.decode(message.payload), let sha = json["sha256"] as? String else {
+      try error(message.seq, "bad_request", "auxiliary message without sha256")
+      return
+    }
+    let transport = self.transport
+    let seq = message.seq
+    let push: @Sendable ([String: Any]) -> Void = { state in
+      try? transport.send(.auxState, seq: 0, data: [AuxPayload.head(state)])
+    }
+    switch type {
+    case .auxLoad:
+      let nbytes = (json["nbytes"] as? NSNumber)?.int64Value ?? 0
+      try transport.send(.auxState, seq: seq, data: [AuxPayload.head(hub.load(sha256: sha, nbytes: nbytes, push: push))])
+    case .auxChunk:
+      let offset = (json["offset"] as? NSNumber)?.int64Value ?? -1
+      if let state = hub.chunk(sha256: sha, offset: offset, data: blob, push: push) {
+        try transport.send(.auxState, seq: seq, data: [AuxPayload.head(state)])
+      }
+    default:
+      let id = json["id"] as? NSNumber ?? NSNumber(value: 0)
+      let outputs = (json["outputs"] as? [String]) ?? []
+      let refusal = hub.submit(id: id, sha256: sha, outputs: outputs, input: blob) { reply, floats in
+        let head = AuxPayload.head(reply)
+        var data = [head]
+        for values in floats {
+          data.append(values.withUnsafeBufferPointer { Data(buffer: $0) })
+        }
+        try? transport.send(.auxResp, seq: seq, data: data)
+      }
+      if let refusal {
+        try transport.send(.auxResp, seq: seq, data: [AuxPayload.head(refusal)])
+      }
     }
   }
 
@@ -278,6 +324,10 @@ final class Session: @unchecked Sendable {
     ]
     for (key, value) in host.backend.describe() {
       response[key] = value
+    }
+    // Carrot's auxiliary vision (`AuxHub`): a comma sends AUX_* only when this says so.
+    if host.aux != nil {
+      response["carrot_aux_v1"] = true
     }
     // Over a phone's cable, frames may come as datagrams: a new token each
     // hello, so pieces of the last session's frames count for nothing
@@ -409,6 +459,7 @@ final class Session: @unchecked Sendable {
       )
     }
     host.frameStats.record(totalUs: reply.totalUs, gpuUs: reply.gpuUs, queueUs: reply.queueUs, sendUs: sendUs)
+    host.aux?.noteFrame(totalUs: reply.totalUs)
   }
 
   /// What an INFER_RESP says; the outputs are in `outputBuffer`.

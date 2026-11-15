@@ -63,6 +63,22 @@ public enum Wire {
     /// The client stops using the link and says why, with what it measured;
     /// no reply. The connection may stay for a later hello.
     case leave = 19
+    // Carrot's auxiliary vision (`AuxHub`): the comma's small camera models
+    // (lane type, visual blind spot) run here beside the driving model. Only
+    // a comma whose hello reply says `carrot_aux_v1` sends these; every
+    // payload is `AuxPayload`: a little-endian u32 JSON length, the JSON, then
+    // raw bytes.
+    /// The comma names a model by sha256 and size; AUX_STATE answers.
+    case auxLoad = 0x4010
+    /// A model's state: ready, need_upload, loading or failed. The answer to
+    /// AUX_LOAD, and pushed when an upload's load finishes.
+    case auxState = 0x4011
+    /// A piece of a model the comma uploads; the last piece starts the load.
+    case auxChunk = 0x4012
+    /// One input tensor (float32) for a ready model.
+    case auxReq = 0x4013
+    /// Its outputs (float32), or why there are none.
+    case auxResp = 0x4014
   }
 
   public struct Flag: OptionSet, Sendable {

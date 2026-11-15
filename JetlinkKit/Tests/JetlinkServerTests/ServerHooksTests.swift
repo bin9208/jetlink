@@ -83,7 +83,8 @@ struct ServerHooksTests {
     ]
     try serve(hooks: ServerHooks()) { _, client in
       let hello = try client.hello()
-      #expect(Set(hello.keys) == python)
+      // onnxruntime runs carrot's auxiliary vision too (`AuxHub`); a backend without it says nothing.
+      #expect(Set(hello.keys) == python.union(["carrot_aux_v1"]))
       #expect(hello["sleep_after"] as? Double == 0)
       // nothing picked yet, and no control layer to download for the comma
       #expect(hello["pick"] is NSNull)

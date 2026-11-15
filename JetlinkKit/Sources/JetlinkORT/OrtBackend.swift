@@ -155,6 +155,12 @@ public final class OrtBackend: EngineBackend {
 
   public var runtimeVersion: String { OrtRuntime.version }
 
+  /// Carrot's auxiliary camera models: on QNN's GPU where this profile has
+  /// QNN (a Snapdragon), so the NPU stays the driving model's, else the CPU.
+  public var aux: (any AuxBackend)? {
+    OrtAuxBackend(qnn: [.htp, .htpWhole, .gpu].contains(profile))
+  }
+
   public func deviceTag() -> String {
     sanitize("\(profile.rawValue)-\(chip)")
   }
