@@ -75,9 +75,15 @@ public enum OrtProfile: String, CaseIterable, Sendable {
   }
 
   /// What a build writes: 5 is every graph split on `ane` and Expand as Tile
-  /// on both, 6 the plain graph. An artifact prepared under another rebuilds.
+  /// on both, 6 the plain graph, 7 the whole graph for the Neural Engine or
+  /// the Hexagon NPU with finite attention masks. An artifact prepared under
+  /// another rebuilds.
   public var prepareVersion: Int {
-    layout == .plain ? 6 : 5
+    switch layout {
+    case .plain: 6
+    case .aneWhole: 7
+    case .split, .whole: 5
+    }
   }
 
   var usesCoreML: Bool {

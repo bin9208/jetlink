@@ -59,7 +59,7 @@ public struct ONNXPreparer: ModelPreparer {
       "stripped \(report.stripped) tinygrad op(s), \(report.retypedImages ? "images retyped to fp16" : "inputs left as declared"), "
       + "\(report.gathers) negative Gather index(es) normalized, \(report.gemms) MatMul+Add rewritten as Gemm(transB=1), \(report.tiles) Expand(s) as Tile"
     if layout == .aneWhole {
-      summary += "; for the whole Neural Engine: \(report.norms) policy LayerNormalization(s) prescaled, \(report.heads) vision head node(s) in fp32"
+      summary += "; for the whole Neural Engine: \(report.norms) policy LayerNormalization(s) prescaled, \(report.heads) vision head node(s) in fp32, \(report.masks) Softmax mask fill(s) made finite"
     }
     return PreparedModel(
       parts: report.parts.map { PreparedModel.Part(name: $0.name, file: $0.url.lastPathComponent, weightBytes: $0.weightBytes) },

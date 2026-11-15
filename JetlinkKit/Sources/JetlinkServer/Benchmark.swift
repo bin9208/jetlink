@@ -159,6 +159,7 @@ extension EngineHost {
     }
 
     var frameMs: [Double] = [], accelMs: [Double] = [], queueMs: [Double] = [], outMs: [Double] = []
+    var steadiness = OutputSteadiness(spec: spec)
     var windows: [BenchmarkWindow] = []
     var windowFrames: [Double] = []
     let thermalAtStart = hooks.thermal()
@@ -227,6 +228,7 @@ extension EngineHost {
 
       i += 1
       if i <= warmup && frameAt < EngineHost.benchmarkWarmupSeconds { continue }
+      if finite { steadiness?.record(output) }
       frameMs.append(Double(totalUs) / 1000)
       accelMs.append(Double(accel) / 1000)
       queueMs.append(Double(queueUs) / 1000)
@@ -250,10 +252,53 @@ extension EngineHost {
       windows.append(
         BenchmarkWindow(startSecond: windowStart, frame: BenchmarkStats.of(windowFrames), thermal: hooks.thermal()))
     }
+    if let line = steadiness?.summary { log.info("benchmark: \(line)") }
     return BenchmarkReport(
       sha256: l.sha256, device: device, seconds: round2(ProcessInfo.processInfo.systemUptime - t0), frames: frameMs.count,
       frame: BenchmarkStats.of(frameMs), accelerator: BenchmarkStats.of(accelMs), queues: BenchmarkStats.of(queueMs), output: BenchmarkStats.of(outMs),
       build: build, over35: frameMs.filter { $0 > 35 }.count, over50: frameMs.filter { $0 > 50 }.count, windows: windows,
       thermalAtStart: thermalAtStart, thermalAtEnd: hooks.thermal(), cancelled: run.cancelled)
+  }
+}
+
+/// How much a single-hypothesis plan (carrot's N16: 33 steps of 15, means
+/// then stds) and the first lead move from one benchmark frame to the next.
+/// The benchmark's camera bytes and scalars never change, so a model that
+/// computes right settles to small changes. A graph the accelerator computes
+/// wrong keeps moving them by metres, as N16 did on a Snapdragon 8 Elite's
+/// NPU in the car.
+struct OutputSteadiness {
+  private let planEndX: Int
+  private let leadX: Int?
+  private var last: (y: Float, x: Float, lead: Float?)?
+  private var dy: [Float] = [], dx: [Float] = [], dLead: [Float] = []
+
+  /// Nil for a model whose plan is not the 990 floats this reads.
+  init?(spec: ModelSpec) {
+    guard let plan = spec.outputSlices.first(where: { $0.name == "plan" }), let start = plan.start, let stop = plan.stop,
+      stop - start == 2 * 33 * 15
+    else { return nil }
+    planEndX = start + 32 * 15
+    leadX = spec.outputSlices.first(where: { $0.name == "lead" })?.start
+  }
+
+  mutating func record(_ output: [Float]) {
+    let now = (y: output[planEndX + 1], x: output[planEndX], lead: leadX.map { output[$0] })
+    if let last {
+      dy.append(abs(now.y - last.y))
+      dx.append(abs(now.x - last.x))
+      if let a = now.lead, let b = last.lead { dLead.append(abs(a - b)) }
+    }
+    last = now
+  }
+
+  var summary: String? {
+    guard !dy.isEmpty else { return nil }
+    func text(_ v: [Float]) -> String {
+      String(format: "mean %.3f max %.3f", Double(v.reduce(0, +)) / Double(v.count), Double(v.max() ?? 0))
+    }
+    var line = "output steadiness over \(dy.count + 1) frames, change per frame: plan end y \(text(dy)) m, plan end x \(text(dx)) m"
+    if !dLead.isEmpty { line += ", lead x \(text(dLead)) m" }
+    return line
   }
 }

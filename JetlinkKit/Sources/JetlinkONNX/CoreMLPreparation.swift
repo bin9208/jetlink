@@ -10,8 +10,9 @@ import Foundation
 /// 4. rewrite MatMul+Add as Gemm with a transposed weight (transB=1);
 /// 5. rewrite repeat-only Expands as Tiles;
 /// 6. for `.aneWhole` only (`layout='ane-whole'`), feed the policy's fp16
-///    LayerNormalizations their input times 1/8 and run the heads after the
-///    vision trunk in fp32;
+///    LayerNormalizations their input times 1/8, run the heads after the
+///    vision trunk in fp32, and give attention masks a finite fill for -inf
+///    (`Patches.finiteSoftmaxMasks`, which Python's preparation does not do);
 /// 7. cut the graph where the vision trunk ends (`.split`, writing
 ///    vision.onnx and policy.onnx), or keep it whole (`.whole` and
 ///    `.aneWhole`, model.onnx);
@@ -73,6 +74,9 @@ public enum CoreMLPreparation {
     public let norms: Int
     /// Vision head nodes moved to fp32; 0 unless the layout is `.aneWhole`.
     public let heads: Int
+    /// Softmax masks given a finite fill for -inf (`finiteSoftmaxMasks`); 0
+    /// unless the layout is `.aneWhole`.
+    public let masks: Int
     public let parts: [Part]
   }
 
@@ -124,9 +128,11 @@ public enum CoreMLPreparation {
     }
     var norms = 0
     var heads = 0
+    var masks = 0
     if layout == .aneWhole {
       norms = try Patches.prescaleLayerNorm(&g)
       heads = try Patches.headsInFP32(&g, src)
+      masks = try Patches.finiteSoftmaxMasks(&g, src)
     }
     model.graph = g
 
@@ -146,7 +152,7 @@ public enum CoreMLPreparation {
     let reported = try write(parts, src, into: directory, progress: progress)
     return Report(
       stripped: stripped, retypedImages: retyped, gathers: gathers, gemms: gemms, tiles: tiles,
-      norms: norms, heads: heads, parts: reported)
+      norms: norms, heads: heads, masks: masks, parts: reported)
   }
 
   /// Encodes each part and streams it to `<name>.onnx` in `directory`; on a

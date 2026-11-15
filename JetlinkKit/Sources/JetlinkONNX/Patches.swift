@@ -454,6 +454,65 @@ enum Patches {
     return done
   }
 
+  // MARK: finite_softmax_masks
+
+  /// What a masked attention score becomes instead of fp16 -inf. Any score
+  /// left unmasked is within a few hundred of it at most, so exp(fill - max)
+  /// underflows to 0 in fp16 exactly as exp(-inf) does.
+  static let softmaxMaskFill = Float16(-10000)
+
+  /// Gives every Softmax that reads `Where(cond, a, b)`, where a or b is an
+  /// fp16 initializer holding -inf alone, a finite copy of that fill
+  /// (`<name>__finite`), and returns how many Where inputs changed.
+  ///
+  /// carrot's N16 masks its 12 temporal attentions so. A row that keeps an
+  /// unmasked score (a causal mask always keeps the diagonal) gives the same
+  /// Softmax either way; onnxruntime's CPU gives N16 bit for bit the same
+  /// outputs and state. QNN's HTP on a Snapdragon 8 Elite (v79) did not
+  /// treat the -inf as 0: N16's plan, lead and speed came out as fresh noise
+  /// every frame while its lanes stayed put. Only a fully masked row differs
+  /// (NaN before, uniform weights after), and the outputs' finite check
+  /// fails such a frame before either reaches the comma anyway.
+  static func finiteSoftmaxMasks(_ g: inout Graph, _ src: Source) throws -> Int {
+    var producer: [String: Int] = [:]
+    for (i, n) in g.nodes.enumerated() {
+      for out in n.outputs { producer[out] = i }
+    }
+    var initializers: [String: Tensor] = [:]
+    for t in g.initializers { initializers[t.key] = t }
+    let negInf: (UInt8, UInt8) = (0x00, 0xFC)  // fp16 -inf, little-endian
+    var finite: [String: String] = [:]
+    var added: [Tensor] = []
+    var changed = 0
+    for softmax in g.nodes where softmax.op == "Softmax" {
+      guard let x = softmax.inputs.first, let w = producer[x], g.nodes[w].op == "Where", g.nodes[w].inputs.count == 3 else { continue }
+      for j in 1...2 {
+        let name = g.nodes[w].inputs[j]
+        if let made = finite[name] {
+          g.nodes[w].inputs[j] = made
+          changed += 1
+          continue
+        }
+        guard let t = initializers[name], t.elementType == DataType.float16, t.elementCount > 0 else { continue }
+        let bytes = try Elements.littleEndian(t, src)
+        let allNegInf = stride(from: 0, to: bytes.count, by: 2).allSatisfy { bytes[$0] == negInf.0 && bytes[$0 + 1] == negInf.1 }
+        guard allNegInf else { continue }
+        let made = "\(name)__finite"
+        let bits = softmaxMaskFill.bitPattern.littleEndian
+        let one = [UInt8(truncatingIfNeeded: bits), UInt8(truncatingIfNeeded: bits >> 8)]
+        added.append(
+          Tensor(
+            name: made, dims: t.dims, dataType: DataType.float16,
+            raw: .owned(Array([[UInt8]](repeating: one, count: t.elementCount).joined()))))
+        finite[name] = made
+        g.nodes[w].inputs[j] = made
+        changed += 1
+      }
+    }
+    g.initializers.append(contentsOf: added)
+    return changed
+  }
+
   // MARK: vision_heads
 
   /// The indices, in graph order, of the heads that end the vision trunk:
