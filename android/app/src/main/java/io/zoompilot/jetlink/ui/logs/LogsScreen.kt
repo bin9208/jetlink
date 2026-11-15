@@ -1,6 +1,6 @@
 package io.zoompilot.jetlink.ui.logs
 
-import android.content.Context
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Share
@@ -41,13 +42,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.zoompilot.jetlink.AppGraph
+import io.zoompilot.jetlink.logs.LogBundle
+import io.zoompilot.jetlink.logs.LogUpload
 import io.zoompilot.jetlink.ui.Format
 import io.zoompilot.jetlink.ui.JetlinkTheme
 import io.zoompilot.jetlink.ui.LogLevel
 import io.zoompilot.jetlink.ui.components.CardSpacing
 import io.zoompilot.jetlink.ui.components.PushedScreen
 import io.zoompilot.jetlink.ui.components.shareFile
-import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -61,25 +63,40 @@ fun LogsScreen(graph: AppGraph, back: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val lines by graph.server.logs.collectAsStateWithLifecycle()
+    var uploading by remember { mutableStateOf(false) }
+    // A file, not an intent's text, which would have to fit one Binder
+    // transaction; with the phone's facts and this process's Android log,
+    // where an NPU's refusal is written.
+    suspend fun bundle() = withContext(Dispatchers.IO) { LogBundle.write(context, lines, graph.settings.values.value.processor) }
     LogsContent(
         lines = lines,
         back = back,
         share = {
+            scope.launch { shareFile(context, bundle(), "text/plain", "Jetlink Logs") }
+        },
+        upload = {
+            uploading = true
             scope.launch {
-                val file = withContext(Dispatchers.IO) { logFile(context, lines) }
-                shareFile(context, file, "text/plain", "Jetlink Logs")
+                val result = runCatching { withContext(Dispatchers.IO) { LogUpload.upload(context, bundle()) } }
+                uploading = false
+                val message = result.fold({ "Logs sent to $it" }, { "Upload failed: ${it.message}" })
+                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
             }
         },
+        uploading = uploading,
         clear = graph.server::clearLogs,
     )
 }
 
-/** The log as a file to share: an intent's text would have to fit one Binder transaction. */
-private fun logFile(context: Context, lines: List<String>): File =
-    File(context.cacheDir, "logs").apply { mkdirs() }.resolve("jetlink.log").apply { writeText(lines.joinToString("\n", postfix = "\n")) }
-
 @Composable
-fun LogsContent(lines: List<String>, back: () -> Unit, share: () -> Unit, clear: () -> Unit) {
+fun LogsContent(
+    lines: List<String>,
+    back: () -> Unit,
+    share: () -> Unit,
+    clear: () -> Unit,
+    upload: () -> Unit = {},
+    uploading: Boolean = false,
+) {
     val colors = JetlinkTheme.colors
     val list = rememberLazyListState()
     var follow by remember { mutableStateOf(true) }
@@ -96,7 +113,8 @@ fun LogsContent(lines: List<String>, back: () -> Unit, share: () -> Unit, clear:
         "Logs",
         back,
         actions = {
-            IconButton(onClick = share, enabled = lines.isNotEmpty()) { Icon(Icons.Filled.Share, contentDescription = "Share") }
+            IconButton(onClick = upload, enabled = !uploading) { Icon(Icons.Filled.CloudUpload, contentDescription = "Send to the log server") }
+            IconButton(onClick = share) { Icon(Icons.Filled.Share, contentDescription = "Share") }
             IconButton(onClick = clear, enabled = lines.isNotEmpty()) { Icon(Icons.Filled.Delete, contentDescription = "Clear") }
         },
     ) { padding ->

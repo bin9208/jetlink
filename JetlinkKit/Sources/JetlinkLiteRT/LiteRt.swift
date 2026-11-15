@@ -76,8 +76,23 @@ public enum LiteRtRuntime {
     /// ship none) and shipped beside libLiteRt.so as Google Tensor's are.
     static let mediaTekLibraries = ["libLiteRtDispatch_MediaTek.so", "libLiteRtCompilerPlugin_MediaTek.so"]
 
+    /// The first NeuroPilot adapter this process can open, by name: which
+    /// one the phone gives apps, for the log.
+    public static let mediaTekAdapter: String? = mediaTekSystemLibraries.first(where: opens)
+
     /// Whether this process can open a MediaTek APU's NeuroPilot adapter.
-    public static let hasMediaTekNPU: Bool = mediaTekSystemLibraries.contains(where: opens)
+    public static var hasMediaTekNPU: Bool { mediaTekAdapter != nil }
+
+    /// One line on the NPU this phone offers LiteRT, for the log: whose, and
+    /// through which system library.
+    public static var npuSummary: String {
+      switch npuVendor {
+      case .googleTensor: "Google Tensor NPU through \(googleTensorSystemLibrary)"
+      case .mediaTek: "MediaTek APU through \(mediaTekAdapter ?? "?")"
+      case nil:
+        "no NPU library open to apps (neither \(googleTensorSystemLibrary) nor \(mediaTekSystemLibraries.joined(separator: ", ")))"
+      }
+    }
 
     /// The NPU this phone gives LiteRT, if any: a Google Tensor's first.
     public static var npuVendor: NPUVendor? {
@@ -156,10 +171,12 @@ enum LiteRtLog {
   }
 
   #if os(Android)
-    /// What this process logged since `start`: LiteRT's info lines and up,
-    /// everything else's warnings and up. An app may read its own.
-    static func lines(since start: Date) -> [String] {
-      guard let pipe = popen("logcat -d -v epoch --pid=\(getpid()) litert:I *:W", "r") else { return [] }
+    /// What this process logged since `start`, info lines and up from every
+    /// tag: MediaTek's NeuroPilot and LiteRT's vendor plugins say why they
+    /// refused a model at info level, under their own tags. An app may read
+    /// its own.
+    static func lines(since start: Date, limit: Int = 200) -> [String] {
+      guard let pipe = popen("logcat -d -v epoch --pid=\(getpid()) *:I", "r") else { return [] }
       defer { pclose(pipe) }
       var data = Data()
       var buffer = [UInt8](repeating: 0, count: 1 << 16)
@@ -169,7 +186,7 @@ enum LiteRtLog {
         data.append(contentsOf: buffer[..<n])
       }
       // a second's slack for the log's own clock
-      return select(String(decoding: data, as: UTF8.self), since: start.timeIntervalSince1970 - 1)
+      return select(String(decoding: data, as: UTF8.self), since: start.timeIntervalSince1970 - 1, limit: limit)
     }
   #endif
 }

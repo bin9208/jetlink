@@ -239,6 +239,9 @@ public final class LiteRtBackend: EngineBackend {
       // not tried again: the GPU's alone instead.
       let attempt = NPUAttempt(artifact: artifact, stage: .compile)
       let target = profile == .npu && attempt.diedBefore ? .gpu : profile
+      if profile == .npu {
+        logNPUContext()
+      }
       if target != profile {
         log.warning("the last compile for the NPU never finished, so \(model.lastPathComponent) runs on the GPU")
       }
@@ -262,11 +265,17 @@ public final class LiteRtBackend: EngineBackend {
       }
       let compileSeconds = Date().timeIntervalSince(compileStarted)
       report("compile", 1, "compiled in \(Int(compileSeconds.rounded())) s")
+      var refusal: [String] = []
       if hardware != target {
         log.warning("the NPU's compiler could not take \(model.lastPathComponent), so it runs on the GPU; LiteRT's lines below say why")
-        copyLiteRtLog(since: compileStarted)
+        refusal = copyLiteRtLog(since: compileStarted)
       }
       var meta = LiteRtArtifact.meta(self, model: model, started: started)
+      if profile == .npu && hardware != .npu {
+        // Kept with the artifact: every later load says again why the NPU
+        // choice runs on the GPU, not only this build.
+        meta["npu_refusal"] = Array(refusal.suffix(40))
+      }
       meta["accelerator"] = hardware.label(chip: chip)
       meta["convert_seconds"] = pythonRound(convertSeconds, 1)
       meta["compile_seconds"] = pythonRound(compileSeconds, 1)
@@ -315,6 +324,16 @@ public final class LiteRtBackend: EngineBackend {
       log.warning("\(artifact.lastPathComponent) was compiled for the NPU but loaded on the GPU; LiteRT's lines below say why")
       copyLiteRtLog(since: loadStarted)
     }
+    if profile == .npu && target != .npu {
+      logNPUContext()
+      let refusal = meta["npu_refusal"] as? [String] ?? []
+      log.warning(
+        "the NPU choice runs on the GPU: this model's build could not use the NPU"
+          + (refusal.isEmpty ? " (no reason was recorded; remove the model's prepared files to build it again)" : "; what LiteRT said then:"))
+      for line in refusal {
+        log.warning("litert (build): \(line)")
+      }
+    }
     log.info("LiteRT on \(profile.rawValue) in \(String(format: "%.1f", seconds)) s: \(engine.label)")
     return engine
   }
@@ -323,7 +342,8 @@ public final class LiteRtBackend: EngineBackend {
 extension LiteRtBackend {
   /// LiteRT's lines since `start` into jetlink's log:
   /// why the NPU took no model, which LiteRT says only in Android's log.
-  func copyLiteRtLog(since start: Date) {
+  @discardableResult
+  func copyLiteRtLog(since start: Date) -> [String] {
     #if os(Android)
       let lines = LiteRtLog.lines(since: start)
       for line in lines {
@@ -332,6 +352,18 @@ extension LiteRtBackend {
       if let refusal = LiteRtLog.refusal(lines) {
         log.warning("why the NPU took no model: \(refusal)")
       }
+      return lines
+    #else
+      return []
+    #endif
+  }
+
+  /// The phone and the NPU it offers, before a compile or load for it.
+  func logNPUContext() {
+    #if os(Android)
+      log.info("NPU: chip \(chip), \(LiteRtRuntime.npuSummary)")
+    #else
+      log.info("NPU: chip \(chip)")
     #endif
   }
 }
