@@ -66,8 +66,13 @@ final class AuxHub: @unchecked Sendable {
   /// Jobs waiting at most; past it a new one is refused as busy.
   static let maxQueued = 4
   /// A driving frame slower than this, on average over the last few, sheds
-  /// auxiliary jobs until it is fast again.
-  static let slowFrameUs: UInt32 = 35_000
+  /// auxiliary jobs until it is fast again. The driving model has the NPU and
+  /// the auxiliary ones the GPU, so they share no accelerator; what matters is
+  /// that a driving frame still answers well inside the comma's 50 ms. At
+  /// 35 ms N16 (37 ms on a Snapdragon 8 Gen 2's NPU) shed every job, so the
+  /// lane and BSD models never left the comma's CPU. Should they slow the
+  /// driving frames past this, shedding takes them off again by itself.
+  static let slowFrameUs: UInt32 = 44_000
   /// Upload pieces past this are refused (a model is ~10 MB).
   static let maxModelBytes: Int64 = 64 << 20
 

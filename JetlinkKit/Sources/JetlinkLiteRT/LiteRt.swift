@@ -63,12 +63,51 @@ public enum LiteRtRuntime {
     /// Whether this process can open the Google Tensor NPU's system library.
     public static let hasGoogleTensorNPU: Bool = opens(googleTensorSystemLibrary)
 
+    /// The NeuroPilot adapter a MediaTek APU is reached through, under the
+    /// names LiteRT's MediaTek plugin tries (neuron_adapter_api.cc); the
+    /// app's manifest declares them. Whether a phone's vendor partition
+    /// gives them to apps is the phone maker's choice.
+    static let mediaTekSystemLibraries = [
+      "libneuronusdk_adapter.mtk.so", "libneuronusdk_adapter.9.mtk.so", "libneuronusdk_adapter.so",
+      "libneuron_adapter_mgvi.so", "libneuron_adapter.so",
+    ]
+
+    /// LiteRT's MediaTek libraries, built from LiteRT's source (its releases
+    /// ship none) and shipped beside libLiteRt.so as Google Tensor's are.
+    static let mediaTekLibraries = ["libLiteRtDispatch_MediaTek.so", "libLiteRtCompilerPlugin_MediaTek.so"]
+
+    /// Whether this process can open a MediaTek APU's NeuroPilot adapter.
+    public static let hasMediaTekNPU: Bool = mediaTekSystemLibraries.contains(where: opens)
+
+    /// The NPU this phone gives LiteRT, if any: a Google Tensor's first.
+    public static var npuVendor: NPUVendor? {
+      hasGoogleTensorNPU ? .googleTensor : hasMediaTekNPU ? .mediaTek : nil
+    }
+
     private static func opens(_ name: String) -> Bool {
       guard let handle = dlopen(name, RTLD_NOW) else { return false }
       dlclose(handle)
       return true
     }
   #endif
+}
+
+/// Whose NPU LiteRT compiles a model for on the phone.
+public enum NPUVendor: Sendable {
+  case googleTensor
+  case mediaTek
+
+  /// LiteRT's dispatch library and compiler plugin for it, beside libLiteRt.
+  var libraries: [String] {
+    #if os(Android)
+      switch self {
+      case .googleTensor: LiteRtRuntime.googleTensorLibraries
+      case .mediaTek: LiteRtRuntime.mediaTekLibraries
+      }
+    #else
+      []
+    #endif
+  }
 }
 
 public struct LiteRtError: Error, CustomStringConvertible {
@@ -170,6 +209,11 @@ final class LiteRtModel: @unchecked Sendable {
       shim.gpu = 1
       cache = programs
       npuCache = directory
+      #if os(Android)
+        if LiteRtRuntime.npuVendor == .mediaTek {
+          shim.npu_vendor = Int32(JL_LITERT_NPU_MEDIATEK)
+        }
+      #endif
     case .cpu(let threads):
       shim.cpu_threads = Int32(threads)
     }

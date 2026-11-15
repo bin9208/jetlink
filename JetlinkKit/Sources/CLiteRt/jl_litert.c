@@ -321,6 +321,15 @@ static char *google_tensor_toml(void) {
   return format("performance_mode = %d\n", 3);
 }
 
+// A MediaTek APU through NeuroPilot v8 (the Dimensity 9000-9400's,
+// litert/vendors/mediatek/supported_soc.csv), compiled for the lowest
+// latency of a single frame: one frame every 50 ms is the comma's pace
+// (litert_mediatek_options.h, kLiteRtMediatekOptionsNeronSDKVersionTypeVersion8,
+// ...PreferFastSingleAnswer).
+static char *mediatek_toml(void) {
+  return format("neron_sdk_version = %d\nperformance_mode = %d\n", 1, 1);
+}
+
 // An environment for one model on an NPU: LiteRT finds the vendor's dispatch
 // library and compiler plugin in the directory it was opened from, and keeps
 // the model it compiles in `cache_dir`, where the next load finds it. LiteRT
@@ -457,8 +466,13 @@ static char *compile(jl_litert_model *m, const char *path, const jl_litert_optio
     error = add_toml(m->options, "xnnpack", cpu_toml(o->cpu_threads));
   }
   if (error == NULL && o->npu_cache_dir != NULL) {
-    // LrtGoogleTensorOptionsGetIdentifier()
-    error = add_toml(m->options, "google_tensor", google_tensor_toml());
+    if (o->npu_vendor == JL_LITERT_NPU_MEDIATEK) {
+      // LrtGetMediatekOptionsIdentifier()
+      error = add_toml(m->options, "mediatek", mediatek_toml());
+    } else {
+      // LrtGoogleTensorOptionsGetIdentifier()
+      error = add_toml(m->options, "google_tensor", google_tensor_toml());
+    }
   }
   if (error != NULL) {
     return error;

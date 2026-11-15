@@ -139,22 +139,23 @@ public final class LiteRtBackend: EngineBackend {
     }
   }
 
-  /// Throws what keeps this process from the NPU: LiteRT's Google Tensor
-  /// libraries missing beside libLiteRt, or no Tensor NPU library in the
-  /// phone's system.
+  /// Throws what keeps this process from the NPU: no Google Tensor or
+  /// MediaTek NPU library in the phone's system, or LiteRT's libraries for
+  /// that NPU missing beside libLiteRt.
   static func checkNPU(libraries: URL?) throws {
     #if os(Android)
       guard let libraries else { throw LiteRtError("the NPU's libraries are looked for beside libLiteRt, and the app named no directory") }
-      if let missing = LiteRtRuntime.googleTensorLibraries.first(where: { !FileManager.default.fileExists(atPath: libraries.appending(path: $0).path) }) {
-        throw LiteRtError("\(missing) is not in the app's libraries, so LiteRT cannot reach the NPU")
-      }
-      guard LiteRtRuntime.hasGoogleTensorNPU else {
+      guard let vendor = LiteRtRuntime.npuVendor else {
         throw LiteRtError(
-          "this phone's system gives apps no \(LiteRtRuntime.googleTensorSystemLibrary), the Google Tensor NPU's library (Pixel 8 and later); "
+          "this phone's system gives apps neither \(LiteRtRuntime.googleTensorSystemLibrary), the Google Tensor NPU's library (Pixel 8 and later), "
+            + "nor a MediaTek APU's NeuroPilot adapter (\(LiteRtRuntime.mediaTekSystemLibraries.joined(separator: ", "))); "
             + "the GPU profile runs on any phone")
       }
+      if let missing = vendor.libraries.first(where: { !FileManager.default.fileExists(atPath: libraries.appending(path: $0).path) }) {
+        throw LiteRtError("\(missing) is not in the app's libraries, so LiteRT cannot reach the NPU")
+      }
     #else
-      throw LiteRtError("LiteRT's NPU profile runs on Android, on a Google Tensor G3 (Pixel 8) or later")
+      throw LiteRtError("LiteRT's NPU profile runs on Android, on a Google Tensor G3 (Pixel 8) or later or a MediaTek Dimensity APU")
     #endif
   }
 

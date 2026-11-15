@@ -53,7 +53,13 @@ typedef struct {
   // `gpu` names instead. The model gets an environment of its own, as this
   // directory is an environment's option.
   const char *npu_cache_dir;
+  // Whose NPU: JL_LITERT_NPU_GOOGLE_TENSOR or JL_LITERT_NPU_MEDIATEK, for
+  // the vendor options the compile carries.
+  int npu_vendor;
 } jl_litert_options;
+
+#define JL_LITERT_NPU_GOOGLE_TENSOR 0
+#define JL_LITERT_NPU_MEDIATEK 1
 
 // Opens LiteRT from `directory`, NULL or "" for the loader's path, and makes
 // the process's environment. The first call that succeeds decides; later

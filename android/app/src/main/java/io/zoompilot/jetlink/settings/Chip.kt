@@ -22,13 +22,29 @@ object Chip {
     /** A Google Tensor whose NPU LiteRT compiles for: "Tensor G3" (the Pixel 8) or later. */
     val hasTensorNpu: Boolean by lazy { (tensorGeneration(model) ?: 0) >= 3 }
 
+    /**
+     * A MediaTek Dimensity whose APU LiteRT's MediaTek plugin compiles for
+     * (NeuroPilot v8 and later, LiteRT's supported_soc.csv): the Dimensity
+     * 9000 to 9400 and their tablet parts. Whether the phone's vendor
+     * partition gives apps the NeuroPilot adapter is checked when the model
+     * is built, which says so if not.
+     */
+    val hasMediaTekNpu: Boolean by lazy {
+        manufacturer.equals("Mediatek", ignoreCase = true) && mediaTekNpuModels.any { model.uppercase().startsWith(it) }
+    }
+
+    private val mediaTekNpuModels = listOf("MT6895", "MT6897", "MT6983", "MT6985", "MT6989", "MT6991", "MT6993", "MT8188", "MT8189", "MT8196")
+
+    /** An NPU LiteRT compiles the model for on the phone: a Tensor's or a Dimensity's. */
+    val hasLiteRtNpu: Boolean get() = hasTensorNpu || hasMediaTekNpu
+
     private val tensorModel = Regex("^Tensor G(\\d+)$")
 
     /** 5 for "Tensor G5", as Build.SOC_MODEL names a Pixel's SoC; null for any other. */
     fun tensorGeneration(model: String): Int? = tensorModel.find(model.trim())?.groupValues?.get(1)?.toIntOrNull()
 
     /** What this phone's Settings offer. */
-    fun processors(current: Processor): List<Processor> = Processor.choices(isQualcomm, hasTensorNpu, isEmulator, current)
+    fun processors(current: Processor): List<Processor> = Processor.choices(isQualcomm, hasLiteRtNpu, isEmulator, current)
 
     /** What Automatic runs on here. */
     val automatic: Processor by lazy { Processor.automatic(hasTensorNpu, isEmulator) }

@@ -22,6 +22,9 @@ val jetlinkVersionCode: Int =
     jetlinkVersion.split(".").map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
         .let { (it.getOrElse(0) { 0 } * 10000) + (it.getOrElse(1) { 0 } * 100) + it.getOrElse(2) { 0 } }
 
+/** Jetlink Carrot's build of this upstream version (bin9208/jetlink releases). */
+val carrotBuild = 3
+
 android {
     namespace = "io.zoompilot.jetlink"
     compileSdk = 37
@@ -35,8 +38,10 @@ android {
         // Android 12: Build.SOC_MODEL and the performance hint API.
         minSdk = 31
         targetSdk = 36
-        versionCode = jetlinkVersionCode
-        versionName = "$jetlinkVersion-carrot.2"
+        // Jetlink Carrot's own build on top: the version installed over an
+        // earlier Carrot build must count higher.
+        versionCode = jetlinkVersionCode * 100 + carrotBuild
+        versionName = "$jetlinkVersion-carrot.$carrotBuild"
         // The QNN runtime is arm64 only, and so is every Snapdragon with an NPU
         // worth driving on. The emulator on an Apple silicon Mac is arm64 too.
         ndk { abiFilters += "arm64-v8a" }
@@ -199,6 +204,12 @@ abstract class LiteRtLibraries @Inject constructor(
     @get:InputFiles @get:PathSensitive(PathSensitivity.NONE) abstract val aar: ConfigurableFileCollection
     @get:InputFiles @get:PathSensitive(PathSensitivity.NONE) abstract val npu: ConfigurableFileCollection
     @get:Input abstract val npuSha256: Property<String>
+    /**
+     * LiteRT's MediaTek dispatch library and compiler plugin, which LiteRT's
+     * releases do not ship: built from the same release's source and kept in
+     * vendor/litert-mediatek with their SHA-256 (README.md there).
+     */
+    @get:InputDirectory @get:PathSensitive(PathSensitivity.RELATIVE) abstract val mediatek: DirectoryProperty
     @get:OutputDirectory abstract val outputDir: DirectoryProperty
 
     @TaskAction
@@ -220,8 +231,21 @@ abstract class LiteRtLibraries @Inject constructor(
                 // the zip has them read-only, which the next sync could not replace
                 filePermissions { unix("rw-r--r--") }
             }
+            from(mediatek.dir("arm64-v8a")) {
+                include("libLiteRtDispatch_MediaTek.so", "libLiteRtCompilerPlugin_MediaTek.so")
+                eachFile { path = "arm64-v8a/$name" }
+            }
             includeEmptyDirs = false
             into(outputDir)
+        }
+        val sums = mediatek.file("SHA256SUMS").get().asFile.readLines().filter(String::isNotBlank).associate {
+            val (sum, name) = it.trim().split(Regex("\\s+"), limit = 2)
+            name.removePrefix("*").substringAfterLast('/') to sum
+        }
+        for (name in listOf("libLiteRtDispatch_MediaTek.so", "libLiteRtCompilerPlugin_MediaTek.so")) {
+            val file = outputDir.file("arm64-v8a/$name").get().asFile
+            val sha256 = MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) }
+            check(sha256 == sums[name]) { "$name has SHA-256 $sha256, not the ${sums[name]} in vendor/litert-mediatek/SHA256SUMS" }
         }
     }
 }
@@ -231,6 +255,7 @@ val liteRtLibraries = tasks.register<LiteRtLibraries>("liteRtLibraries") {
     npu.from(litertNpu)
     // litert_npu_runtime_libraries_jit.zip of LiteRT v2.2.0
     npuSha256.set("d6d160104f110e690f1c9b0c54ab3855af1a12e405dcc6e644dd7e3e1955aac4")
+    mediatek.set(rootDir.resolve("vendor/litert-mediatek"))
     outputDir.set(layout.buildDirectory.dir("litert/jniLibs"))
 }
 

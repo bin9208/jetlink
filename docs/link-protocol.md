@@ -104,7 +104,7 @@ bench tools). There is one version: update the comma and Jetlink together.
   (QNN's GPU on a Snapdragon, so the NPU stays the driving model's, else the
   CPU provider) and writes the reply from there. It sheds a job while the
   device is `serious` or `critical` or the last driving frames averaged over
-  35 ms; the comma then runs that one on its own CPU. Models are cached in
+  44 ms; the comma then runs that one on its own CPU. Models are cached in
   `<cache>/aux/<sha256>.onnx`.
 
 Measured on the bench Jetson: [performance](status.md#measured-performance).

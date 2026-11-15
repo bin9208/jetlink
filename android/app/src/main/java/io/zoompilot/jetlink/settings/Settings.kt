@@ -29,9 +29,9 @@ enum class Processor(val backend: Backend, val device: String, val title: String
     Npu(Backend.Ort, "htp-whole", "NPU"),
 
     /**
-     * A Google Tensor's NPU, which LiteRT compiles the model for on the phone
-     * through the compiler in its system; the GPU runs a model that compiler
-     * cannot take.
+     * A Google Tensor's NPU or a MediaTek Dimensity's APU, which LiteRT
+     * compiles the model for on the phone through the vendor's compiler; the
+     * GPU runs a model that compiler cannot take.
      */
     TensorNpu(Backend.LiteRt, "npu", "NPU"),
 

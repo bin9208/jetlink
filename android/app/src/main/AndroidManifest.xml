@@ -41,6 +41,15 @@
              library runs the compiled model through both. -->
         <uses-native-library android:name="libedgetpu_litert.so" android:required="false" />
         <uses-native-library android:name="libedgetpu_util.so" android:required="false" />
+        <!-- A MediaTek Dimensity's APU: LiteRT's MediaTek plugin and dispatch
+             library reach it through NeuroPilot's adapter, under whichever
+             of these names the phone's vendor partition offers apps. -->
+        <uses-native-library android:name="libneuronusdk_adapter.mtk.so" android:required="false" />
+        <uses-native-library android:name="libneuronusdk_adapter.9.mtk.so" android:required="false" />
+        <uses-native-library android:name="libneuronusdk_adapter.so" android:required="false" />
+        <uses-native-library android:name="libneuron_adapter_mgvi.so" android:required="false" />
+        <uses-native-library android:name="libneuron_adapter.so" android:required="false" />
+        <uses-native-library android:name="libneuron_sys_util.mtk.so" android:required="false" />
 
         <activity
             android:name=".MainActivity"
