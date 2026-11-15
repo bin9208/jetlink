@@ -36,7 +36,7 @@ android {
         minSdk = 31
         targetSdk = 36
         versionCode = jetlinkVersionCode
-        versionName = "$jetlinkVersion-carrot.1"
+        versionName = "$jetlinkVersion-carrot.2"
         // The QNN runtime is arm64 only, and so is every Snapdragon with an NPU
         // worth driving on. The emulator on an Apple silicon Mac is arm64 too.
         ndk { abiFilters += "arm64-v8a" }
