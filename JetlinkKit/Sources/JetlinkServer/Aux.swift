@@ -59,6 +59,49 @@ enum AuxPayload {
   }
 }
 
+/// Auxiliary replies wait while a driving frame runs and go right after its
+/// reply. The comma reads replies in order, so a lane model's 1-2 MB reply
+/// written as it finished (about when the next driving frame did, both
+/// started right after a driving reply) sat ahead of the driving reply: in
+/// the car every lane job, 2.5 a second, made one driving frame 30-40 ms
+/// late. Sent after a driving reply, it crosses while the comma waits for the
+/// next one and the phone computes it.
+final class AuxOutbox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var driving = false
+  private var held: [(seq: UInt32, data: [Data])] = []
+
+  /// A driving frame came in: replies finished from now wait.
+  func hold() {
+    lock.withLock { driving = true }
+  }
+
+  /// Its reply is out (or failed): what waited goes now.
+  func release(transport: any MessageLink) {
+    let waiting = lock.withLock {
+      driving = false
+      defer { held.removeAll() }
+      return held
+    }
+    for reply in waiting {
+      try? transport.send(.auxResp, seq: reply.seq, data: reply.data)
+    }
+  }
+
+  func send(seq: UInt32, data: [Data], transport: any MessageLink) {
+    let now = lock.withLock {
+      if driving {
+        held.append((seq, data))
+        return false
+      }
+      return true
+    }
+    if now {
+      try? transport.send(.auxResp, seq: seq, data: data)
+    }
+  }
+}
+
 /// The auxiliary models this device holds, and the thread they run on. One
 /// per host: models and engines outlive a connection, as the driving
 /// model's do.
@@ -241,7 +284,7 @@ final class AuxHub: @unchecked Sendable {
   /// AUX_REQ: queues the job and returns nil, or returns the refusal to send
   /// at once. `reply` sends the outputs from the worker.
   func submit(
-    id: NSNumber, sha256 sha: String, outputs: [String], input: UnsafeRawBufferPointer,
+    id: NSNumber, sha256 sha: String, outputs: [String], input: UnsafeRawBufferPointer, inputU8: Bool = false,
     reply: @escaping @Sendable (_ json: [String: Any], _ blob: [[Float]]) -> Void
   ) -> [String: Any]? {
     func refuse(_ code: String, _ detail: String) -> [String: Any] {
@@ -256,9 +299,10 @@ final class AuxHub: @unchecked Sendable {
       lock.unlock()
       return refuse(known ? "loading" : "not_loaded", "model \(sha.prefix(12)) is not ready")
     }
-    guard input.count == engine.input.byteCount else {
+    let expected = inputU8 ? engine.input.byteCount / 4 : engine.input.byteCount
+    guard input.count == expected else {
       lock.unlock()
-      return refuse("bad_shape", "input is \(input.count) bytes, the model takes \(engine.input.byteCount)")
+      return refuse("bad_shape", "input is \(input.count) bytes, the model takes \(expected)")
     }
     guard queued < AuxHub.maxQueued else {
       lock.unlock()
@@ -266,7 +310,19 @@ final class AuxHub: @unchecked Sendable {
     }
     queued += 1
     lock.unlock()
-    let copy = Data(input)
+    // uint8 from the comma, value / 255 as its CPU path computes it in
+    // float32: the same floats, a quarter of the bytes over the cable.
+    let copy: Data
+    if inputU8 {
+      var floats = Data(count: input.count * 4)
+      floats.withUnsafeMutableBytes { out in
+        let dst = out.bindMemory(to: Float.self)
+        for i in 0..<input.count { dst[i] = Float(input[i]) / 255.0 }
+      }
+      copy = floats
+    } else {
+      copy = Data(input)
+    }
     let received = DispatchTime.now().uptimeNanoseconds
     worker.async { [self] in
       lock.lock()

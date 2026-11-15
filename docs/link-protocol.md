@@ -104,7 +104,11 @@ bench tools). There is one version: update the comma and Jetlink together.
   (QNN's GPU on a Snapdragon, so the NPU stays the driving model's, else the
   CPU provider) and writes the reply from there. It sheds a job while the
   device is `serious` or `critical` or the last driving frames averaged over
-  44 ms; the comma then runs that one on its own CPU. Models are cached in
+  44 ms; the comma then runs that one on its own CPU. With `carrot_aux_v2` in the
+  hello the comma may send the input as uint8 (`"input": "u8"`, each value
+  byte / 255 as float32) and ask for float16 outputs (`"outputs_dtype":
+  "f16"`), and a reply finished while a driving frame runs is held until that
+  frame's INFER_RESP is out, so it never lands ahead of a driving reply. Models are cached in
   `<cache>/aux/<sha256>.onnx`.
 
 Measured on the bench Jetson: [performance](status.md#measured-performance).

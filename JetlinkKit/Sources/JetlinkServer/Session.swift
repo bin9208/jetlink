@@ -44,6 +44,8 @@ final class Session: @unchecked Sendable {
   /// the telemetry when asked for.
   private let parts: UnsafeMutablePointer<UnsafeRawBufferPointer>
   private static let maxParts = 4
+  /// Auxiliary replies held while a driving frame runs (AuxOutbox).
+  let auxOutbox = AuxOutbox()
 
   init(transport: any MessageLink, host: EngineHost) {
     self.transport = transport
@@ -233,13 +235,27 @@ final class Session: @unchecked Sendable {
     default:
       let id = json["id"] as? NSNumber ?? NSNumber(value: 0)
       let outputs = (json["outputs"] as? [String]) ?? []
-      let refusal = hub.submit(id: id, sha256: sha, outputs: outputs, input: blob) { reply, floats in
-        let head = AuxPayload.head(reply)
-        var data = [head]
-        for values in floats {
-          data.append(values.withUnsafeBufferPointer { Data(buffer: $0) })
+      let inputU8 = (json["input"] as? String) == "u8"
+      let half = (json["outputs_dtype"] as? String) == "f16"
+      let outbox = self.auxOutbox
+      let refusal = hub.submit(id: id, sha256: sha, outputs: outputs, input: blob, inputU8: inputU8) { reply, floats in
+        var reply = reply
+        if half && !floats.isEmpty {
+          reply["outputs_dtype"] = "f16"
         }
-        try? transport.send(.auxResp, seq: seq, data: data)
+        var data = [AuxPayload.head(reply)]
+        for values in floats {
+          if half {
+            var bytes = Data(count: values.count * 2)
+            bytes.withUnsafeMutableBytes { out in
+              values.withUnsafeBytes { Convert.f32ToF16($0.baseAddress!, out.baseAddress!, count: values.count) }
+            }
+            data.append(bytes)
+          } else {
+            data.append(values.withUnsafeBufferPointer { Data(buffer: $0) })
+          }
+        }
+        outbox.send(seq: seq, data: data, transport: transport)
       }
       if let refusal {
         try transport.send(.auxResp, seq: seq, data: [AuxPayload.head(refusal)])
@@ -328,6 +344,10 @@ final class Session: @unchecked Sendable {
     // Carrot's auxiliary vision (`AuxHub`): a comma sends AUX_* only when this says so.
     if host.aux != nil {
       response["carrot_aux_v1"] = true
+      // v2: inputs may come as uint8 (`"input": "u8"`, value / 255) and
+      // outputs go as float16 when asked (`"outputs_dtype": "f16"`), and a
+      // reply never lands ahead of a driving one (AuxOutbox).
+      response["carrot_aux_v2"] = true
     }
     // Over a phone's cable, frames may come as datagrams: a new token each
     // hello, so pieces of the last session's frames count for nothing
@@ -425,6 +445,8 @@ final class Session: @unchecked Sendable {
   /// the write waits for the comma to read, and nothing else that needs the
   /// host (status, a build's progress, the control channel) should wait with it.
   private func onInfer(_ message: Message) throws {
+    auxOutbox.hold()
+    defer { auxOutbox.release(transport: transport) }
     let (sha, skip) = wanted()
     host.lock.lock()
     guard let loaded = host.loaded, loaded.sha256 == sha, loaded.spec.frameSkip == skip, !host.benchmarking else {
