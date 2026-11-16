@@ -172,6 +172,35 @@ import Testing
     }
   }
 
+  /// The NPU sweep's blocks of Light Speed 2's kinds of layers convert both
+  /// ways and, all but attention (slow in the reference interpreter), run to
+  /// finite outputs. JETLINK_SWEEP_OUT keeps each one's NPU conversion.
+  @Test(arguments: SyntheticModels.Block.allCases)
+  func theSweepsBlocksConvert(_ block: SyntheticModels.Block) throws {
+    let dir = try TemporaryDirectory()
+    let onnx = dir.url.appendingPathComponent("block.onnx")
+    try SyntheticModels.writeBlocks(block, repeats: 2, to: onnx)
+    let gpu = try Self.convert(onnx).file
+    let npu = try Self.convert(onnx, forNPU: true).file
+    #expect(!gpu.operators.isEmpty && !npu.operators.isEmpty)
+    if let out = ProcessInfo.processInfo.environment["JETLINK_SWEEP_OUT"], !out.isEmpty {
+      let name = String(block.rawValue.prefix { $0 != " " })
+      _ = try LiteRTPreparation.prepare(source: onnx, into: URL(fileURLWithPath: out).appendingPathComponent(name), forNPU: true)
+    }
+    guard block != .attention else { return }
+    for file in [gpu, npu] {
+      var inputs: [String: [Float]] = [:]
+      for i in file.inputs {
+        let t = file.tensors[i]
+        inputs[t.name] = (0..<t.shape.reduce(1, *)).map { Float($0 % 13) * 0.1 - 0.6 }
+      }
+      var interpreter = TFLiteInterpreter(file)
+      let y = try #require(try interpreter.run(inputs)["y"])
+      let finite = y.allSatisfy(\.isFinite)
+      #expect(finite)
+    }
+  }
+
   /// A real model converted on request: JETLINK_LITERT_PREPARE=<model.onnx>.
   /// Every BATCH_MATMUL's two inputs share a rank of 2 to 4, which MediaTek's
   /// NeuroPilot requires: one that does not fails the APU's whole module.
