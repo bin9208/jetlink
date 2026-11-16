@@ -274,21 +274,35 @@ final class LiteRtModel: @unchecked Sendable {
   }
 
   /// What runs the model: on an NPU compile, the NPU, or the GPU when the
-  /// NPU's compiler could not take it.
+  /// NPU's compiler could not take it. The NPU when any input or output is
+  /// its: an op it left to the GPU, as the uint8 image input's CAST on a
+  /// MediaTek APU, makes that input the GPU's, not the model.
   var hardware: LiteRtProfile {
-    get throws { try reads(input: 0) }
+    get throws {
+      var best = LiteRtProfile.cpu
+      for (output, count) in [(true, outputs.count), (false, inputs.count)] {
+        for index in 0..<count {
+          switch try reads(output: output, index) {
+          case .npu: return .npu
+          case .gpu: best = .gpu
+          default: break
+          }
+        }
+      }
+      return best
+    }
   }
 
   /// Whether the accelerator reads input `index` straight from host memory,
   /// as the CPU does, where a GPU or an NPU wants its own.
   func readsHostMemory(input index: Int) throws -> Bool {
-    try reads(input: index) == .cpu
+    try reads(output: false, index) == .cpu
   }
 
-  /// Whose memory input `index` is read from best.
-  private func reads(input index: Int) throws -> LiteRtProfile {
+  /// Whose memory input or output `index` is used from best.
+  private func reads(output: Bool, _ index: Int) throws -> LiteRtProfile {
     var hardware: Int32 = 0
-    try LiteRtError.check(jl_litert_model_input_hardware(pointer, index, &hardware))
+    try LiteRtError.check(jl_litert_model_io_hardware(pointer, output ? 1 : 0, index, &hardware))
     switch hardware {
     case Int32(JL_LITERT_NPU): return .npu
     case Int32(JL_LITERT_GPU): return .gpu

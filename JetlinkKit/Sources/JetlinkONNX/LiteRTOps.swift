@@ -867,8 +867,10 @@ extension LiteRTLowering {
     }
     guard case .tensor(let i) = x, model.tensors[i].type == .float32 else { throw OnnxError("Expand is lowered for float tensors only") }
     let tx = try operand(x, rank: out.count, "\(n.outputs[0])__lhs")
-    let spread = zip(model.tensors[tx].shape, out).map { $0 == $1 ? 1 : $1 }
-    let ones = floatTensor([Float](repeating: 1, count: spread.reduce(1, *)), spread, "\(n.outputs[0])__ones")
+    // The ones have the output's whole shape, so only x is broadcast:
+    // MediaTek's MDLA refuses a MUL whose inputs each spread the other
+    // ([1, 9, 1, 512] by [1, 1, 32, 1] in Light Speed 2).
+    let ones = floatTensor([Float](repeating: 1, count: out.reduce(1, *)), out, "\(n.outputs[0])__ones")
     let o = try define(n.outputs[0], out, .float32)
     emit(.mul, [tx, ones], [o], .mul)
   }
@@ -1149,22 +1151,58 @@ extension LiteRTLowering {
       nhwc = padded
       padding = .valid
     }
-    let filter = try convFilter(w, depthwise: depthwise, "\(name)__filter")
-    let bias: Int
+    let biasValues: [Float]
     if n.inputs.count > 2, !n.inputs[2].isEmpty {
-      guard var b = constant(n.inputs[2]), b.count == filters else { throw OnnxError("Conv needs a constant bias of \(filters)") }
-      bias = biasTensor(try floats(b), b.name)
+      guard let b = constant(n.inputs[2]), b.count == filters else { throw OnnxError("Conv needs a constant bias of \(filters)") }
+      biasValues = try floats(b)
     } else {
-      bias = biasTensor([Float](repeating: 0, count: filters), "\(name)__bias")
+      biasValues = [Float](repeating: 0, count: filters)
     }
     let result = addTensor("\(name)__nhwc_out", [batch, out[0], out[1], filters], .float32)
     if depthwise {
-      emit(
-        .depthwiseConv2d, [nhwc, filter, bias], [result],
-        .depthwiseConv2d(
-          padding: padding, strideW: Int32(strides[1]), strideH: Int32(strides[0]), multiplier: Int32(filters / channels),
-          dilationW: Int32(dilations[1]), dilationH: Int32(dilations[0])))
+      // A depthwise convolution over more channels than MediaTek's MDLA
+      // holds ("cannot fit on internal buffers": Light Speed 2's 1024 and
+      // 2048 channel 7x7 ones, depending on the chip) runs as one per
+      // depthwiseChannels, joined along the channels.
+      let multiplier = filters / channels
+      let part = multiplier == 1 && channels > Self.depthwiseChannels ? Self.depthwiseChannels : channels
+      let weight = part < channels ? try bytes(w) : []
+      let rowBytes = try Self.elementSize(w) * kh * kw
+      var pieces: [Int] = []
+      for start in stride(from: 0, to: channels, by: part) {
+        let count = min(part, channels - start)
+        let whole = count == channels
+        let suffix = whole ? "" : "__ch\(start)"
+        var input = nhwc
+        if !whole {
+          input = addTensor("\(name)__in\(suffix)", [batch, model.tensors[nhwc].shape[1], model.tensors[nhwc].shape[2], count], .float32)
+          emit(
+            .slice, [nhwc, int32Tensor([0, 0, 0, start], "\(name)__begin\(suffix)"),
+              int32Tensor([batch, model.tensors[nhwc].shape[1], model.tensors[nhwc].shape[2], count], "\(name)__size\(suffix)")],
+            [input], .slice)
+        }
+        let slice = whole
+          ? w
+          : Constant(
+            name: "\(w.name)\(suffix)", dims: [count, 1, kh, kw], type: w.type,
+            bytes: .owned(Array(weight[(start * rowBytes)..<((start + count) * rowBytes)])))
+        let filter = try convFilter(slice, depthwise: true, "\(name)__filter\(suffix)")
+        let bias = biasTensor(Array(biasValues[start..<(start + count * multiplier)]), "\(name)\(suffix)")
+        let piece = whole ? result : addTensor("\(name)__nhwc_out\(suffix)", [batch, out[0], out[1], count], .float32)
+        emit(
+          .depthwiseConv2d, [input, filter, bias], [piece],
+          .depthwiseConv2d(
+            padding: padding, strideW: Int32(strides[1]), strideH: Int32(strides[0]), multiplier: Int32(multiplier),
+            dilationW: Int32(dilations[1]), dilationH: Int32(dilations[0])))
+        pieces.append(piece)
+      }
+      if pieces.count > 1 {
+        emit(.concatenation, pieces, [result], .concatenation(axis: 3))
+        count("depthwise convolutions split by \(Self.depthwiseChannels) channels")
+      }
     } else {
+      let filter = try convFilter(w, depthwise: false, "\(name)__filter")
+      let bias = biasTensor(biasValues, "\(name)")
       emit(
         .conv2d, [nhwc, filter, bias], [result],
         .conv2d(padding: padding, strideW: Int32(strides[1]), strideH: Int32(strides[0]), dilationW: Int32(dilations[1]), dilationH: Int32(dilations[0])))
@@ -1172,6 +1210,12 @@ extension LiteRTLowering {
     let o = try define(name, [batch, filters, out[0], out[1]], .float32)
     emit(.transpose, [result, int32Tensor([0, 3, 1, 2], "\(name)__nchw_perm")], [o], .transpose)
   }
+
+  /// The most channels one DEPTHWISE_CONV_2D takes (conv): what every
+  /// Dimensity from the 9000 (MT6983) to the 9400 (MT6991) compiles a 7x7 one
+  /// of, checked with android/scripts/mediatek-compile-check.sh. The 9300
+  /// takes 1024, the 9200 and 9000 not.
+  static let depthwiseChannels = 512
 
   /// The weight in TFLite's layout: OIHW to OHWI for CONV_2D, [O, 1, kH, kW]
   /// to [1, kH, kW, O] for DEPTHWISE_CONV_2D. A large fp16 weight is
@@ -1181,7 +1225,8 @@ extension LiteRTLowering {
     let taps = kh * kw
     let shape = depthwise ? [1, kh, kw, o] : [o, kh, kw, i]
     let size = try Self.elementSize(w)
-    if w.type == DataType.float16 && w.count < Self.fp16MinElements || (w.type != DataType.float16 && w.type != DataType.float) {
+    // A small weight is made here (transposedWeight says why).
+    if w.count < Self.fp16MinElements || (w.type != DataType.float16 && w.type != DataType.float) {
       let values = try floats(w)
       var permuted = [Float](repeating: 0, count: values.count)
       for f in 0..<o {

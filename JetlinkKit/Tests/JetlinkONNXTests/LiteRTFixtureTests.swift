@@ -144,7 +144,13 @@ import Testing
   /// no operator's output: NeuroPilot's MDLA refuses any other.
   @Test(.enabled(if: ProcessInfo.processInfo.environment["JETLINK_LITERT_PREPARE"] != nil))
   func aRealModelSuitsTheAPU() throws {
-    let model = URL(fileURLWithPath: ProcessInfo.processInfo.environment["JETLINK_LITERT_PREPARE"]!)
+    let environment = ProcessInfo.processInfo.environment
+    let model = URL(fileURLWithPath: environment["JETLINK_LITERT_PREPARE"]!)
+    // JETLINK_LITERT_OUT=<directory> keeps the converted model there, for
+    // compiling it ahead of time for an NPU on the PC.
+    if let out = environment["JETLINK_LITERT_OUT"], !out.isEmpty {
+      _ = try LiteRTPreparation.prepare(source: model, into: URL(fileURLWithPath: out, isDirectory: true))
+    }
     let (file, report) = try Self.convert(model)
     print("converted \(model.lastPathComponent): \(report.summary)")
     var ops: [String: Int] = [:]

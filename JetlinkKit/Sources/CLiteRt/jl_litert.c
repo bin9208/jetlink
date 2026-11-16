@@ -628,13 +628,13 @@ static char *requirements(const jl_litert_model *model, int output, size_t index
   return NULL;
 }
 
-char *jl_litert_model_input_hardware(const jl_litert_model *model, size_t index, int *hardware) {
+char *jl_litert_model_io_hardware(const jl_litert_model *model, int output, size_t index, int *hardware) {
   *hardware = JL_LITERT_CPU;
-  if (slot(model, 0, index) < 0) {
-    return copy("no such input");
+  if (slot(model, output, index) < 0) {
+    return copy(output ? "no such output" : "no such input");
   }
   LiteRtTensorBufferRequirements req = NULL;
-  char *error = requirements(model, 0, index, &req);
+  char *error = requirements(model, output, index, &req);
   if (error != NULL) {
     return error;
   }

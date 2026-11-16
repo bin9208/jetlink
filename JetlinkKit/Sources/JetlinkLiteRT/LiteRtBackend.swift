@@ -80,8 +80,10 @@ public final class LiteRtBackend: EngineBackend {
   /// under another version rebuilds. 2: a MatMul by a constant is a
   /// FULLY_CONNECTED (MediaTek's NeuroPilot refused the BATCH_MATMUL).
   /// 3: every bias is a FLOAT32 constant (NeuroPilot's MDLA refused one
-  /// behind a DEQUANTIZE).
-  static let conversionVersion = 3
+  /// behind a DEQUANTIZE). 4: a depthwise convolution over more than 512
+  /// channels is split, and Expand's ones have the output's shape (what
+  /// MDLA could not hold or broadcast).
+  static let conversionVersion = 4
 
   /// How the NPU's compile is set up, kept with an artifact built for the
   /// NPU's profile. 1: LiteRT sees only the phone's vendor's compiler plugin

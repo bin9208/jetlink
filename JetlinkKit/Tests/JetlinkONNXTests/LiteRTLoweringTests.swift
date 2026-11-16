@@ -251,8 +251,9 @@ import Testing
   // MARK: Gemm and MatMul
 
   /// A long fp16 bias is a FLOAT32 constant, never FLOAT16 behind a
-  /// DEQUANTIZE: MediaTek's NeuroPilot wants a bias constant.
-  @Test func longBiasesAreFloat32Constants() throws {
+  /// DEQUANTIZE: MediaTek's NeuroPilot wants a bias constant. A depthwise
+  /// convolution over 2048 channels is four of 512, joined.
+  @Test func longBiasesAreFloat32ConstantsAndWideDepthwiseSplits() throws {
     var v = SeededValues(seed: 13)
     let x = v(2048)
     let dw = v(2048)
@@ -273,7 +274,8 @@ import Testing
     let (file, _) = try g.convert()
     let produced = Set(file.operators.flatMap(\.outputs))
     let users = file.operators.filter { $0.op == "DEPTHWISE_CONV_2D" || $0.op == "FULLY_CONNECTED" }
-    #expect(users.count == 2)
+    #expect(file.count("DEPTHWISE_CONV_2D") == 4 && file.count("FULLY_CONNECTED") == 1 && file.count("CONCATENATION") == 1)
+    #expect(file.operators.filter { $0.op == "DEPTHWISE_CONV_2D" }.allSatisfy { file.tensors[$0.inputs[1]].shape == [1, 1, 1, 512] })
     for o in users {
       #expect(!produced.contains(o.inputs[2]) && file.tensors[o.inputs[2]].type == TFLite.TensorType.float32.rawValue)
     }

@@ -91,12 +91,14 @@ size_t jl_litert_model_io_count(const jl_litert_model *model, int output);
 char *jl_litert_model_io_info(const jl_litert_model *model, int output, size_t index, char *name, size_t name_cap,
                               int *elem_type, int64_t *dims, size_t dims_cap, size_t *rank);
 
-// Whose memory the accelerator reads input `index` from best: JL_LITERT_CPU
-// for the host's, where a buffer over the caller's memory costs no copy;
-// JL_LITERT_GPU for a GPU's; JL_LITERT_NPU for memory shared with an NPU (an
-// AHardwareBuffer, DMA-BUF, ION or FastRPC buffer). For input 0, what runs
-// the model: an NPU compile that worked, or one LiteRT fell back from.
-char *jl_litert_model_input_hardware(const jl_litert_model *model, size_t index, int *hardware);
+// Whose memory the accelerator reads input `index` (or writes output
+// `index`, when `output` is set) from best: JL_LITERT_CPU for the host's,
+// where a buffer over the caller's memory costs no copy; JL_LITERT_GPU for a
+// GPU's; JL_LITERT_NPU for memory shared with an NPU (an AHardwareBuffer,
+// DMA-BUF, ION or FastRPC buffer). Any input or output the NPU's says an NPU
+// compile worked: an op LiteRT left to the GPU, as a uint8 input's CAST,
+// makes that input the GPU's.
+char *jl_litert_model_io_hardware(const jl_litert_model *model, int output, size_t index, int *hardware);
 
 // A buffer for an input or output over `nbytes` of caller memory, 64-byte
 // aligned, which must outlive it.
