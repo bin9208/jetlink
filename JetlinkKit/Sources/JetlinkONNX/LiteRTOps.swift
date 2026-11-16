@@ -1011,6 +1011,15 @@ extension LiteRTLowering {
     return true
   }
 
+  /// A convolution's or FULLY_CONNECTED's bias, a FLOAT32 constant of any
+  /// length. A long fp16 one would otherwise be stored FLOAT16 behind a
+  /// DEQUANTIZE, whose output MediaTek's NeuroPilot does not count as
+  /// constant: "MDLA: bias should be constant" failed the APU's compile of
+  /// Light Speed 2 at its 32 convolutions of 1024 and 2048 channels.
+  mutating func biasTensor(_ values: [Float], _ name: String) -> Int {
+    addTensor("\(name)__bias_f32", [values.count], .float32, buffer: buffer(Elements.encode(values, as: DataType.float)))
+  }
+
   mutating func gemm(_ n: Node) throws {
     guard (n.attribute("alpha")?.f ?? 1) == 1, (n.attribute("beta")?.f ?? 1) == 1 else {
       throw OnnxError("Gemm with alpha or beta other than 1 is not lowered")
@@ -1043,9 +1052,8 @@ extension LiteRTLowering {
     var rest: Value?
     if n.inputs.count > 2, !n.inputs[2].isEmpty {
       let c = try value(n.inputs[2])
-      if case .constant(var cc) = c, cc.count == units, cc.dims.filter({ $0 != 1 }).count <= 1 {
-        cc.dims = [units]
-        bias = try constantTensor(cc)
+      if case .constant(let cc) = c, cc.count == units, cc.dims.filter({ $0 != 1 }).count <= 1 {
+        bias = biasTensor(try floats(cc), cc.name)
       } else {
         rest = c
       }
@@ -1145,10 +1153,9 @@ extension LiteRTLowering {
     let bias: Int
     if n.inputs.count > 2, !n.inputs[2].isEmpty {
       guard var b = constant(n.inputs[2]), b.count == filters else { throw OnnxError("Conv needs a constant bias of \(filters)") }
-      b.dims = [filters]
-      bias = try constantTensor(b)
+      bias = biasTensor(try floats(b), b.name)
     } else {
-      bias = floatTensor([Float](repeating: 0, count: filters), [filters], "\(name)__bias")
+      bias = biasTensor([Float](repeating: 0, count: filters), "\(name)__bias")
     }
     let result = addTensor("\(name)__nhwc_out", [batch, out[0], out[1], filters], .float32)
     if depthwise {

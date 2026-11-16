@@ -250,6 +250,43 @@ import Testing
 
   // MARK: Gemm and MatMul
 
+  /// A long fp16 bias is a FLOAT32 constant, never FLOAT16 behind a
+  /// DEQUANTIZE: MediaTek's NeuroPilot wants a bias constant.
+  @Test func longBiasesAreFloat32Constants() throws {
+    var v = SeededValues(seed: 13)
+    let x = v(2048)
+    let dw = v(2048)
+    let b = v(2048)
+    let w = v(2048 * 8)
+    let gb = v(2048)
+    var g = OnnxGraphBuilder()
+    g.input("x", Self.f32, [1, 2048, 1, 1])
+    g.input("a", Self.f32, [1, 8])
+    g.fp16("dw", [2048, 1, 1, 1], dw)
+    g.fp16("b", [2048], b)
+    g.fp16("w", [2048, 8], w)
+    g.fp16("gb", [2048], gb)
+    g.node("Conv", ["x", "dw", "b"], ["c"], [.int("group", 2048)])
+    g.node("Gemm", ["a", "w", "gb"], ["y"], [.int("transB", 1)])
+    g.output("c", Self.f32, [1, 2048, 1, 1])
+    g.output("y", Self.f32, [1, 2048])
+    let (file, _) = try g.convert()
+    let produced = Set(file.operators.flatMap(\.outputs))
+    let users = file.operators.filter { $0.op == "DEPTHWISE_CONV_2D" || $0.op == "FULLY_CONNECTED" }
+    #expect(users.count == 2)
+    for o in users {
+      #expect(!produced.contains(o.inputs[2]) && file.tensors[o.inputs[2]].type == TFLite.TensorType.float32.rawValue)
+    }
+    let a = v(8)
+    let out = try Self.run(file, ["x": x, "a": a])
+    // the weights and biases are stored fp16
+    let narrow = { (f: Float) in Float(Float16(f)) }
+    let c = (0..<2048).map { x[$0] * narrow(dw[$0]) + narrow(b[$0]) }
+    let y = (0..<2048).map { j in narrow(gb[j]) + Self.sum(8) { a[$0] * narrow(w[j * 8 + $0]) } }
+    #expect(maxError(out["c"]!, c) < 1e-4)
+    #expect(maxError(out["y"]!, y) < 1e-4)
+  }
+
   @Test func gemmIsFullyConnected() throws {
     var v = SeededValues(seed: 11)
     let a = v(2 * 64)

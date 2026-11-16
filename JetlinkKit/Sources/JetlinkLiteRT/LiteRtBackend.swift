@@ -79,7 +79,9 @@ public final class LiteRtBackend: EngineBackend {
   /// What JetlinkONNX's LiteRTPreparation writes now: an artifact converted
   /// under another version rebuilds. 2: a MatMul by a constant is a
   /// FULLY_CONNECTED (MediaTek's NeuroPilot refused the BATCH_MATMUL).
-  static let conversionVersion = 2
+  /// 3: every bias is a FLOAT32 constant (NeuroPilot's MDLA refused one
+  /// behind a DEQUANTIZE).
+  static let conversionVersion = 3
 
   /// How the NPU's compile is set up, kept with an artifact built for the
   /// NPU's profile. 1: LiteRT sees only the phone's vendor's compiler plugin

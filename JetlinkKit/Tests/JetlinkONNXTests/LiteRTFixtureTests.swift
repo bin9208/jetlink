@@ -140,8 +140,10 @@ import Testing
   /// A real model converted on request: JETLINK_LITERT_PREPARE=<model.onnx>.
   /// Every BATCH_MATMUL's two inputs share a rank of 2 to 4, which MediaTek's
   /// NeuroPilot requires: one that does not fails the APU's whole module.
+  /// Every convolution's and FULLY_CONNECTED's bias is a FLOAT32 constant,
+  /// no operator's output: NeuroPilot's MDLA refuses any other.
   @Test(.enabled(if: ProcessInfo.processInfo.environment["JETLINK_LITERT_PREPARE"] != nil))
-  func aRealModelsMatmulsSuitTheAPU() throws {
+  func aRealModelSuitsTheAPU() throws {
     let model = URL(fileURLWithPath: ProcessInfo.processInfo.environment["JETLINK_LITERT_PREPARE"]!)
     let (file, report) = try Self.convert(model)
     print("converted \(model.lastPathComponent): \(report.summary)")
@@ -151,6 +153,11 @@ import Testing
     for o in file.operators where o.op == "BATCH_MATMUL" {
       let ranks = o.inputs.prefix(2).map { file.tensors[$0].shape.count }
       #expect(ranks[0] == ranks[1] && (2...4).contains(ranks[0]), "\(file.tensors[o.outputs[0]].name): input ranks \(ranks)")
+    }
+    let produced = Set(file.operators.flatMap(\.outputs))
+    for o in file.operators where ["CONV_2D", "DEPTHWISE_CONV_2D", "FULLY_CONNECTED"].contains(o.op) && o.inputs.count > 2 && o.inputs[2] >= 0 {
+      let bias = file.tensors[o.inputs[2]]
+      #expect(!produced.contains(o.inputs[2]) && bias.type == TFLite.TensorType.float32.rawValue, "\(o.op) \(bias.name): bias is not a FLOAT32 constant")
     }
   }
 }
