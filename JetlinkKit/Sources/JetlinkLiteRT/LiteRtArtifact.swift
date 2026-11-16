@@ -30,15 +30,15 @@ enum LiteRtArtifact {
 
   /// A built artifact's sidecar. Throws `ArtifactInvalid`, which rebuilds
   /// it, when the conversion was another version or the model is missing.
-  static func open(_ artifact: URL) throws -> [String: Any] {
-    try Artifact.open(artifact, version: LiteRtBackend.conversionVersion, unversioned: 0, runtime: "LiteRT", files: [model])
+  static func open(_ artifact: URL, profile: LiteRtProfile) throws -> [String: Any] {
+    try Artifact.open(artifact, version: LiteRtBackend.conversionVersion(profile), unversioned: 0, runtime: "LiteRT", files: [model])
   }
 
   /// The sidecar keys every build writes; the runtime's release goes under
   /// `litert`, as onnxruntime's goes under `onnxruntime`.
   static func meta(_ backend: LiteRtBackend, model: URL, started: Date) -> [String: Any] {
     var meta = Artifact.meta(backend, runtimeKey: "litert", model: model, started: started)
-    meta["prepare"] = LiteRtBackend.conversionVersion
+    meta["prepare"] = LiteRtBackend.conversionVersion(backend.profile)
     meta["preparer"] = "swift"
     return meta
   }

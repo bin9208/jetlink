@@ -248,7 +248,7 @@ extension LiteRTLowering {
         try alias(n.outputs[0], v)
         return
       }
-      if uint8InputsAsFloat && target == .uint8 && model.tensors[i].type == .float32 {
+      if forNPU && target == .uint8 && model.tensors[i].type == .float32 {
         // The image values stay FLOAT32 for the NPU, as the inputs they
         // came from are: 0...255 already.
         try alias(n.outputs[0], v)
@@ -874,10 +874,12 @@ extension LiteRTLowering {
     }
     guard case .tensor(let i) = x, model.tensors[i].type == .float32 else { throw OnnxError("Expand is lowered for float tensors only") }
     let tx = try operand(x, rank: out.count, "\(n.outputs[0])__lhs")
-    // The ones have the output's whole shape, so only x is broadcast:
-    // MediaTek's MDLA refuses a MUL whose inputs each spread the other
-    // ([1, 9, 1, 512] by [1, 1, 32, 1] in Light Speed 2).
-    let ones = floatTensor([Float](repeating: 1, count: out.reduce(1, *)), out, "\(n.outputs[0])__ones")
+    // For the NPU the ones have the output's whole shape, so only x is
+    // broadcast: MediaTek's MDLA refuses a MUL whose inputs each spread the
+    // other ([1, 9, 1, 512] by [1, 1, 32, 1] in Light Speed 2). The GPU
+    // takes the small ones.
+    let spread = forNPU ? out : zip(model.tensors[tx].shape, out).map { $0 == $1 ? 1 : $1 }
+    let ones = floatTensor([Float](repeating: 1, count: spread.reduce(1, *)), spread, "\(n.outputs[0])__ones")
     let o = try define(n.outputs[0], out, .float32)
     emit(.mul, [tx, ones], [o], .mul)
   }
@@ -976,9 +978,13 @@ extension LiteRTLowering {
     guard da[da.count - 1] == db[db.count - 2] else { throw OnnxError("MatMul of \(da) and \(db)") }
     let batch = try Self.broadcast(Array(da.dropLast(2)), Array(db.dropLast(2)))
     let out = batch + [da[da.count - 2], db[db.count - 1]]
-    if case .constant(let w) = b, try matmulAsFullyConnected(n, a, w, out) {
+    // For the NPU only: the GPU ran Light Speed 2's BATCH_MATMULs by a
+    // constant [K, N] in carrot.7's ~55 ms, and slower once they were
+    // FULLY_CONNECTEDs (70-110 ms on a Dimensity 9300, with the splits below).
+    if forNPU, case .constant(let w) = b, try matmulAsFullyConnected(n, a, w, out) {
       return
     }
+    // A constant right-hand side stays [K, N] for the GPU.
     // Run-time operands share a rank.
     let rank = max(da.count, db.count)
     let ta = try operand(a, rank: rank, "\(n.outputs[0])__lhs")
@@ -1170,9 +1176,10 @@ extension LiteRTLowering {
       // A depthwise convolution over more channels than MediaTek's MDLA
       // holds ("cannot fit on internal buffers": Light Speed 2's 1024 and
       // 2048 channel 7x7 ones, depending on the chip) runs as one per
-      // depthwiseChannels, joined along the channels.
+      // depthwiseChannels, joined along the channels. For the NPU only: the
+      // GPU runs them whole.
       let multiplier = filters / channels
-      let part = multiplier == 1 && channels > Self.depthwiseChannels ? Self.depthwiseChannels : channels
+      let part = forNPU && multiplier == 1 && channels > Self.depthwiseChannels ? Self.depthwiseChannels : channels
       let weight = part < channels ? try bytes(w) : []
       let rowBytes = try Self.elementSize(w) * kh * kw
       var pieces: [Int] = []

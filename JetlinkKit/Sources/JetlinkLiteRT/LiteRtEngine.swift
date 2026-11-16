@@ -174,16 +174,32 @@ public final class LiteRtEngine: EngineCore, @unchecked Sendable {
   public override func execute() throws {
     guard let model else { throw HostError.failed("engine is closed") }
     let binding = sets[stateOnDevice ? phase : parity]
+    let t0 = DispatchTime.now().uptimeNanoseconds
     for copy in binding.copiesIn {
       try copy.buffer.write(from: copy.host, bytes: copy.bytes)
     }
+    let t1 = DispatchTime.now().uptimeNanoseconds
     try model.run(inputs: binding.inputs, outputs: binding.outputs)
+    let t2 = DispatchTime.now().uptimeNanoseconds
     for copy in binding.copiesOut {
       try copy.buffer.read(into: copy.host, bytes: copy.bytes)
     }
+    let t3 = DispatchTime.now().uptimeNanoseconds
+    lastPhases = [
+      ("copy in", Self.us(t1 - t0)), ("model", Self.us(t2 - t1)), ("copy out", Self.us(t3 - t2)),
+    ]
     if stateOnDevice {
       phase ^= 1
     }
+  }
+
+  private var lastPhases: [(name: String, us: UInt32)] = []
+  /// The last run's copies into the accelerator's buffers, the model, and
+  /// the copies back (an NPU's; a GPU's and the CPU's copy nothing here).
+  public override var phases: [(name: String, us: UInt32)] { lastPhases }
+
+  private static func us(_ nanoseconds: UInt64) -> UInt32 {
+    UInt32(min(UInt64(UInt32.max), nanoseconds / 1000))
   }
 
   /// The GPU's copies of the state, emptied as the host's are.

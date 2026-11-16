@@ -84,8 +84,10 @@ public final class LiteRtBackend: EngineBackend {
   /// channels is split, and Expand's ones have the output's shape (what
   /// MDLA could not hold or broadcast). 5: for the NPU, uint8 inputs are
   /// FLOAT32 (the APU cannot CAST them, and a CAST on the GPU beside it
-  /// failed the compiled model).
-  static let conversionVersion = 5
+  /// failed the compiled model). 6, the GPU's: the NPU's rewrites are the
+  /// NPU's alone, and the GPU's conversion is carrot.7's again. The NPU's
+  /// stays 5, so its 10-minute compile on a MediaTek is kept.
+  static func conversionVersion(_ profile: LiteRtProfile) -> Int { profile == .npu ? 5 : 6 }
 
   /// How the NPU's compile is set up, kept with an artifact built for the
   /// NPU's profile. 1: LiteRT sees only the phone's vendor's compiler plugin
@@ -107,7 +109,7 @@ public final class LiteRtBackend: EngineBackend {
   /// The phone's build fingerprint, which a model compiled for the NPU is
   /// good for; "" where the app names none.
   private let firmware: String
-  private let log = ServerLog(category: "litert")
+  let log = ServerLog(category: "litert")
 
   /// `libraries` is the directory holding libLiteRt and its GPU
   /// accelerator, the Android app's nativeLibraryDir; nil reads
@@ -233,7 +235,7 @@ public final class LiteRtBackend: EngineBackend {
       let convertStarted = Date()
       let convertTook = (expect["convert_seconds"] as? NSNumber)?.doubleValue ?? 0
       let converted = try Ticker.during(interval: 1, Ticker.paced("convert", "converting the model for LiteRT", took: convertTook, report: report)) {
-        try LiteRTPreparation.prepare(source: model, into: staged, uint8InputsAsFloat: profile == .npu)
+        try LiteRTPreparation.prepare(source: model, into: staged, forNPU: profile == .npu)
       }
       let convertSeconds = Date().timeIntervalSince(convertStarted)
       log.info("converted \(model.lastPathComponent): \(converted.summary)")
@@ -317,7 +319,7 @@ public final class LiteRtBackend: EngineBackend {
   // MARK: load
 
   public func load(artifact: URL, report: @escaping ProgressFn) throws -> any Engine {
-    let meta = try LiteRtArtifact.open(artifact)
+    let meta = try LiteRtArtifact.open(artifact, profile: profile)
     // What the build found runs the model: the NPU, or for the NPU's profile
     // the GPU when it could not take it, which a load does not ask again.
     let target = profile == .npu && meta["hardware"] as? String != LiteRtProfile.npu.rawValue ? .gpu : profile

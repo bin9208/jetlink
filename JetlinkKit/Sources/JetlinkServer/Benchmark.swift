@@ -133,6 +133,18 @@ extension EngineHost {
     }
     do {
       let report = try measure(l, seconds: seconds, run: run)
+      if !report.cancelled {
+        let started = ProcessInfo.processInfo.systemUptime
+        let directory = cache.layout.root.appending(path: "npu-sweep", directoryHint: .isDirectory)
+        let lines = backend.afterBenchmark(directory: directory) { [weak self] detail in
+          self?.emit(
+            .benchmark(
+              BenchmarkEvent(
+                state: "running", elapsed: round2(report.seconds + ProcessInfo.processInfo.systemUptime - started), total: seconds,
+                frames: report.frames, frame: report.frame, report: nil, detail: detail)))
+        }
+        for line in lines { log.info("benchmark: \(line)") }
+      }
       emit(
         .benchmark(
           BenchmarkEvent(
@@ -159,6 +171,9 @@ extension EngineHost {
     }
 
     var frameMs: [Double] = [], accelMs: [Double] = [], queueMs: [Double] = [], outMs: [Double] = []
+    // the engine's own parts of a run (Engine.phases), in the order it gave them
+    var phaseMs: [String: [Double]] = [:], phaseOrder: [String] = []
+    var nonFinite = 0
     var steadiness = OutputSteadiness(spec: spec)
     var windows: [BenchmarkWindow] = []
     var windowFrames: [Double] = []
@@ -220,6 +235,7 @@ extension EngineHost {
       let outputUs = microseconds(since: readStarted)
       let totalUs = microseconds(since: started)
       let accel = l.engine.lastGpuUs
+      let parts = l.engine.phases
       if finite {
         // the hidden state back into the queues, as a frame from the comma does
         l.staging.keep(outputs: out, type: io.type)
@@ -233,6 +249,11 @@ extension EngineHost {
       accelMs.append(Double(accel) / 1000)
       queueMs.append(Double(queueUs) / 1000)
       outMs.append(Double(outputUs) / 1000)
+      for part in parts {
+        if phaseMs[part.name] == nil { phaseOrder.append(part.name) }
+        phaseMs[part.name, default: []].append(Double(part.us) / 1000)
+      }
+      if !finite { nonFinite += 1 }
       windowFrames.append(Double(totalUs) / 1000)
       let second = Int(ProcessInfo.processInfo.systemUptime - t0)
       if second - windowStart >= EngineHost.benchmarkWindow {
@@ -253,6 +274,17 @@ extension EngineHost {
         BenchmarkWindow(startSecond: windowStart, frame: BenchmarkStats.of(windowFrames), thermal: hooks.thermal()))
     }
     if let line = steadiness?.summary { log.info("benchmark: \(line)") }
+    // The numbers the report shows on the screen, in the log too, where a
+    // shared log bundle carries them: whole frame, the engine's run and its
+    // parts, the queues, reading the output back.
+    func stats(_ name: String, _ ms: [Double]) -> String {
+      let s = BenchmarkStats.of(ms)
+      return "\(name) mean \(s.mean) p50 \(s.p50) p90 \(s.p90) max \(s.max)"
+    }
+    var times = [stats("frame", frameMs), stats("engine", accelMs)]
+    times += phaseOrder.map { stats("  \($0)", phaseMs[$0]!) }
+    times += [stats("queues", queueMs), stats("output", outMs)]
+    log.info("benchmark: \(frameMs.count) frames (\(nonFinite) not finite), ms: \(times.joined(separator: "; "))")
     return BenchmarkReport(
       sha256: l.sha256, device: device, seconds: round2(ProcessInfo.processInfo.systemUptime - t0), frames: frameMs.count,
       frame: BenchmarkStats.of(frameMs), accelerator: BenchmarkStats.of(accelMs), queues: BenchmarkStats.of(queueMs), output: BenchmarkStats.of(outMs),

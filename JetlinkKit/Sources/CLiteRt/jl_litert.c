@@ -328,8 +328,12 @@ static char *google_tensor_toml(void) {
 // litert/vendors/mediatek/supported_soc.csv), compiled for the lowest
 // latency of a single frame: one frame every 50 ms is the comma's pace
 // (litert_mediatek_options.h, kLiteRtMediatekOptionsNeronSDKVersionTypeVersion8,
-// ...PreferFastSingleAnswer).
-static char *mediatek_toml(void) {
+// ...PreferFastSingleAnswer). `tuned`: turbo boost (3), the L1 cache
+// optimizations and the low-latency hint (1) as well.
+static char *mediatek_toml(int tuned) {
+  if (tuned) {
+    return format("neron_sdk_version = %d\nperformance_mode = %d\nl1_cache_optimizations = true\noptimization_hint = %d\n", 1, 3, 1);
+  }
   return format("neron_sdk_version = %d\nperformance_mode = %d\n", 1, 1);
 }
 
@@ -540,7 +544,7 @@ static char *compile(jl_litert_model *m, const char *path, const jl_litert_optio
   if (error == NULL && o->npu_cache_dir != NULL) {
     if (o->npu_vendor == JL_LITERT_NPU_MEDIATEK) {
       // LrtGetMediatekOptionsIdentifier()
-      error = add_toml(m->options, "mediatek", mediatek_toml());
+      error = add_toml(m->options, "mediatek", mediatek_toml(o->npu_tuned));
     } else {
       // LrtGoogleTensorOptionsGetIdentifier()
       error = add_toml(m->options, "google_tensor", google_tensor_toml());

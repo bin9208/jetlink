@@ -83,7 +83,7 @@ import Testing
     // For an NPU, img is a FLOAT32 input of the same values and its Casts go:
     // MediaTek's APU cannot CAST uint8, and one left to the GPU beside it
     // failed the compiled model.
-    let (npu, report) = try g.convert(uint8InputsAsFloat: true)
+    let (npu, report) = try g.convert(forNPU: true)
     #expect(npu.inputs.map { npu.tensors[$0].type } == [TFLite.TensorType.float16.rawValue, TFLite.TensorType.float32.rawValue])
     #expect(npu.count("CAST") == 2 && report.lowerings["uint8 inputs as FLOAT32"] == 1)
     #expect(try Self.run(npu, ["h": [-2, 0.5, 1, 3], "img": [0, 1, 2, 255]])["o"]! == [0, 1.5, 3, 258])
@@ -104,7 +104,7 @@ import Testing
     g.node("Concat", ["kept", "ff"], ["nextf"], [.int("axis", 1)])
     g.node("Cast", ["nextf"], ["next_q"], [.int("to", 2)])
     g.output("next_q", DataType.uint8, [1, 2, 4])
-    let (file, report) = try g.convert(uint8InputsAsFloat: true)
+    let (file, report) = try g.convert(forNPU: true)
     #expect(file.count("CAST") == 0)
     #expect((file.inputs + file.outputs).allSatisfy { file.tensors[$0].type == TFLite.TensorType.float32.rawValue })
     #expect(report.lowerings["uint8 outputs as FLOAT32"] == 1 && report.lowerings["uint8 Casts kept FLOAT32"] == 1)
@@ -302,7 +302,9 @@ import Testing
     g.node("Gemm", ["a", "w", "gb"], ["y"], [.int("transB", 1)])
     g.output("c", Self.f32, [1, 2048, 1, 1])
     g.output("y", Self.f32, [1, 2048])
-    let (file, _) = try g.convert()
+    // The GPU's conversion runs the depthwise one whole.
+    #expect(try g.convert().file.count("DEPTHWISE_CONV_2D") == 1)
+    let (file, _) = try g.convert(forNPU: true)
     let produced = Set(file.operators.flatMap(\.outputs))
     let users = file.operators.filter { $0.op == "DEPTHWISE_CONV_2D" || $0.op == "FULLY_CONNECTED" }
     #expect(file.count("DEPTHWISE_CONV_2D") == 4 && file.count("FULLY_CONNECTED") == 1 && file.count("CONCATENATION") == 1)
@@ -372,11 +374,16 @@ import Testing
     g.node("MatMul", ["q", "k"], ["qk"])
     g.output("xw", Self.f32, [2, 3, 4])
     g.output("qk", Self.f32, [1, 2, 3, 3])
-    let (file, _) = try g.convert()
-    // A constant right-hand side is a FULLY_CONNECTED on x flattened to
-    // [6, 5], its weight transposed to [N, K], reshaped back to [2, 3, 4];
-    // k is lifted to q's rank. Every BATCH_MATMUL's inputs share a rank,
-    // which MediaTek's NeuroPilot requires.
+    // For the GPU both are BATCH_MATMULs, the constant kept [K, N]; k is
+    // lifted to q's rank.
+    let gpu = try g.convert().file
+    #expect(gpu.count("BATCH_MATMUL") == 2 && gpu.count("FULLY_CONNECTED") == 0 && gpu.count("RESHAPE") == 1)
+    let gpuOut = try Self.run(gpu, ["x": x, "q": q, "k": k])
+    // For the NPU a constant right-hand side is a FULLY_CONNECTED on x
+    // flattened to [6, 5], its weight transposed to [N, K], reshaped back to
+    // [2, 3, 4]. Every BATCH_MATMUL's inputs share a rank, which MediaTek's
+    // NeuroPilot requires.
+    let (file, _) = try g.convert(forNPU: true)
     #expect(file.count("BATCH_MATMUL") == 1)
     #expect(file.count("FULLY_CONNECTED") == 1)
     #expect(file.count("RESHAPE") == 3)
@@ -392,6 +399,8 @@ import Testing
     }
     #expect(maxError(out["xw"]!, xw) < 1e-5)
     #expect(maxError(out["qk"]!, qk) < 1e-5)
+    #expect(maxError(gpuOut["xw"]!, xw) < 1e-5)
+    #expect(maxError(gpuOut["qk"]!, qk) < 1e-5)
   }
 
   // MARK: reductions and Softmax
@@ -745,15 +754,13 @@ import Testing
     let deq = try #require(file.operators.first { $0.op == "DEQUANTIZE" })
     #expect(deq.version == 3 && file.operators.first?.op == "DEQUANTIZE")
     let narrow = file.tensors[deq.inputs[0]]
-    // the MatMul's weight, transposed to FULLY_CONNECTED's [N, K]
-    #expect(narrow.type == TFLite.TensorType.float16.rawValue && narrow.shape == [32, 64])
+    #expect(narrow.type == TFLite.TensorType.float16.rawValue && narrow.shape == [64, 32])
     guard case .external(let offset, let size) = file.buffers[narrow.buffer] else {
       Issue.record("the fp16 weight is not after the flatbuffer: \(file.buffers[narrow.buffer])")
       return
     }
     #expect(offset % 64 == 0 && offset >= report.flatbufferBytes && size == 64 * 32 * 2)
-    let wT = (0..<32).flatMap { j in (0..<64).map { w[$0 * 32 + j] } }
-    #expect(file.data(deq.inputs[0]) == Elements.encode(wT, as: DataType.float16))
+    #expect(file.data(deq.inputs[0]) == Elements.encode(w, as: DataType.float16))
     let add = try #require(file.operators.first { $0.op == "ADD" })
     let bias = file.tensors[add.inputs[1]]
     #expect(bias.type == TFLite.TensorType.float32.rawValue)

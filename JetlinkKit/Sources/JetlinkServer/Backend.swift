@@ -60,6 +60,10 @@ public protocol Engine: AnyObject {
   func warm() throws -> String
   /// Logs the engine's own timing so far: a benchmark's end.
   func flushTiming()
+  /// The last run's parts, in order, microseconds: LiteRT's copies to and
+  /// from an NPU's buffers and the model's run between, for the benchmark's
+  /// log. Empty when the run is one part.
+  var phases: [(name: String, us: UInt32)] { get }
   func close()
 }
 
@@ -85,6 +89,14 @@ public protocol EngineBackend: AnyObject, Sendable {
   /// Runs carrot's auxiliary camera models beside the driving model, or nil
   /// for a backend that cannot (`AuxHub`).
   var aux: (any AuxBackend)? { get }
+  /// What the backend measures after a benchmark, beside the model: LiteRT's
+  /// NPU sweep on a MediaTek phone. Works in `directory`, says how far it is
+  /// through `progress`, and returns lines for the log. Nothing by default.
+  func afterBenchmark(directory: URL, progress: @escaping (String) -> Void) -> [String]
+}
+
+extension EngineBackend {
+  public func afterBenchmark(directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
 }
 
 extension Engine {
@@ -93,6 +105,7 @@ extension Engine {
   public var coolsWhenIdle: Bool { false }
   public func runIdle() throws { try run() }
   public func flushTiming() {}
+  public var phases: [(name: String, us: UInt32)] { [] }
 }
 
 extension EngineBackend {

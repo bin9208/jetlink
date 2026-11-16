@@ -77,7 +77,7 @@ struct LiteRTLowering {
   /// How often each special case fired, for the report: masks, views.
   var counts: [String: Int] = [:]
   /// uint8 graph inputs become FLOAT32 ones (LiteRTPreparation.prepare).
-  var uint8InputsAsFloat = false
+  var forNPU = false
 
   private init(_ src: Source, opset: Int64, recorded: [String: [Int64]]) {
     self.src = src
@@ -86,9 +86,9 @@ struct LiteRTLowering {
   }
 
   /// Lowers `g`: its inputs, every node in order, its outputs.
-  static func lower(_ g: Graph, opset: Int64, _ src: Source, uint8InputsAsFloat: Bool = false) throws -> LiteRTLowering {
+  static func lower(_ g: Graph, opset: Int64, _ src: Source, forNPU: Bool = false) throws -> LiteRTLowering {
     var l = LiteRTLowering(src, opset: opset, recorded: Patches.staticDims(g))
-    l.uint8InputsAsFloat = uint8InputsAsFloat
+    l.forNPU = forNPU
     l.nodes = g.nodes
     for (k, n) in g.nodes.enumerated() {
       for name in n.inputs where !name.isEmpty {
@@ -126,7 +126,7 @@ struct LiteRTLowering {
       return Int(v)
     }
     var edge = try Self.edgeType(vi.elemType, vi.key)
-    if edge == .uint8 && uint8InputsAsFloat {
+    if edge == .uint8 && forNPU {
       // Its values 0...255 as floats, which the graph's Cast then leaves.
       edge = .float32
       count("uint8 inputs as FLOAT32")
@@ -150,7 +150,7 @@ struct LiteRTLowering {
   private mutating func output(_ vi: ValueInfo) throws {
     let name = vi.key
     var type = try Self.edgeType(vi.elemType, name)
-    if type == .uint8 && uint8InputsAsFloat {
+    if type == .uint8 && forNPU {
       // A stateful graph's image queue, handed back for the next frame as
       // the input it came from: FLOAT32 too.
       type = .float32

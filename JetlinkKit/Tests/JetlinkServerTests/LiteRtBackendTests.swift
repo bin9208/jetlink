@@ -112,11 +112,11 @@ struct LiteRtBackendTests {
       let artifact = engines.appending(path: artifacts[0])
       #expect(FileManager.default.fileExists(atPath: artifact.appending(path: "model.tflite").path))
       #expect(FileManager.default.fileExists(atPath: artifact.appending(path: "gpu-cache").path))
-      let meta = try LiteRtArtifact.open(artifact)
+      let meta = try LiteRtArtifact.open(artifact, profile: profile)
       #expect(meta["backend"] as? String == "litert")
       #expect(meta["litert"] as? String == LiteRtRuntime.version)
       #expect(meta["accelerator"] as? String == profile.label(chip: HostChip.name()))
-      #expect(meta["prepare"] as? Int == LiteRtBackend.conversionVersion)
+      #expect(meta["prepare"] as? Int == LiteRtBackend.conversionVersion(profile))
       #expect(((meta["artifact_bytes"] as? NSNumber)?.int64Value ?? 0) > 0)
     }
   }
@@ -189,7 +189,7 @@ struct LiteRtBackendTests {
     try backend(.cpu).build(model: TinyModel.queued, artifact: artifact, report: { _, _, _ in }, metaExtra: [:])
     try backend(.cpu).load(artifact: artifact, report: { _, _, _ in }).close()
     var meta = Artifact.sidecar(artifact)
-    meta["prepare"] = LiteRtBackend.conversionVersion + 1
+    meta["prepare"] = LiteRtBackend.conversionVersion(.cpu) + 1
     try Artifact.writeSidecar(artifact, meta)
     #expect(throws: ArtifactInvalid.self) { try backend(.cpu).load(artifact: artifact, report: { _, _, _ in }) }
     #expect(throws: ArtifactInvalid.self) { try backend(.cpu).load(artifact: temp.url.appending(path: "missing.litertcache"), report: { _, _, _ in }) }
@@ -224,7 +224,7 @@ struct LiteRtProfileTests {
   @Test("The NPU's options keep its compiled model where the GPU's and the CPU's do not look")
   func npuOptions() {
     let compiled = URL(fileURLWithPath: "/tmp/\(LiteRtArtifact.npuCache)")
-    guard case .npu(let directory, let gpu) = LiteRtProfile.npu.options(compiled: compiled) else {
+    guard case .npu(let directory, let gpu, _) = LiteRtProfile.npu.options(compiled: compiled) else {
       Issue.record("not the NPU's options")
       return
     }

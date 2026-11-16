@@ -25,6 +25,15 @@ public enum LiteRtRuntime {
   /// succeeds decides for the process; later calls return at once.
   public static func load(directory: URL? = nil) throws {
     let path = directory?.path ?? ProcessInfo.processInfo.environment[directoryVariable]
+    #if os(Android)
+      if hasMediaTekNPU {
+        // NeuroPilot prints the execution plan of each model it compiles,
+        // which unit runs each layer, into the log: what tells a model that
+        // runs on the APU's MDLA from one that falls to its CPU. A compile
+        // only; it costs a run nothing.
+        setenv("MTKNN_ADAPTER_SHOW_EXEC_PLAN", "1", 0)
+      }
+    #endif
     try LiteRtError.check(jl_litert_open(path))
   }
 
@@ -201,7 +210,9 @@ enum LiteRtCompileOptions: Sendable {
   /// an existing directory, for the next load with the same one. Where the
   /// NPU's compiler cannot take the model, the GPU runs it as `.gpu(cache:)`
   /// would: `LiteRtModel.hardware` tells which one did.
-  case npu(compiled: URL, gpu: (directory: URL, key: String)?)
+  /// `tuned` compiles a MediaTek APU for turbo boost and low latency
+  /// (jl_litert_options.npu_tuned), for the NPU sweep.
+  case npu(compiled: URL, gpu: (directory: URL, key: String)?, tuned: Bool = false)
   /// XNNPACK on the CPU, with a pool of `threads`.
   case cpu(threads: Int)
 }
@@ -222,10 +233,11 @@ final class LiteRtModel: @unchecked Sendable {
     case .gpu(let programs):
       shim.gpu = 1
       cache = programs
-    case .npu(let directory, let programs):
+    case .npu(let directory, let programs, let tuned):
       shim.gpu = 1
       cache = programs
       npuCache = directory
+      shim.npu_tuned = tuned ? 1 : 0
       #if os(Android)
         if LiteRtRuntime.npuVendor == .mediaTek {
           shim.npu_vendor = Int32(JL_LITERT_NPU_MEDIATEK)

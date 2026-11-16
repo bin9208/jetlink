@@ -9,9 +9,9 @@ import Testing
 /// compute, and every graph the CoreML tests prepare converting with its
 /// inputs and outputs as they were.
 @Suite struct LiteRTFixtureTests {
-  static func convert(_ url: URL) throws -> (file: TFLiteFile, report: LiteRTPreparation.Report) {
+  static func convert(_ url: URL, forNPU: Bool = false) throws -> (file: TFLiteFile, report: LiteRTPreparation.Report) {
     let dir = try TemporaryDirectory()
-    let report = try LiteRTPreparation.prepare(source: url, into: dir.url)
+    let report = try LiteRTPreparation.prepare(source: url, into: dir.url, forNPU: forNPU)
     return (try TFLiteFile(report.url), report)
   }
 
@@ -137,6 +137,41 @@ import Testing
     #expect(out.values.allSatisfy { $0.allSatisfy(\.isFinite) })
   }
 
+  /// The NPU sweep's model (SyntheticModels): written, converted both ways,
+  /// and computing its layers as plain loops do.
+  @Test func theSweepsLinearStackConvertsAndComputes() throws {
+    let dir = try TemporaryDirectory()
+    let onnx = dir.url.appendingPathComponent("stack.onnx")
+    let (layers, width, rows) = (3, 8, 2)
+    try SyntheticModels.writeLinearStack(layers: layers, width: width, rows: rows, to: onnx)
+    let gpu = try Self.convert(onnx).file
+    let npu = try Self.convert(onnx, forNPU: true).file
+    #expect(gpu.count("BATCH_MATMUL") == layers && npu.count("FULLY_CONNECTED") == layers && gpu.count("GELU") == layers - 1)
+    let x = (0..<(rows * width)).map { Float($0 % 5) - 2 }
+    // the writer's fp16 values, as plain floats
+    let w = (0..<(width * width)).map { Float(Float16(Float(($0 * 7919) % 2001 - 1000) * 2e-5)) }
+    let b = (0..<width).map { Float(Float16(Float($0 % 17) * 1e-3)) }
+    var h = x
+    for i in 0..<layers {
+      h = (0..<(rows * width)).map { e in
+        let (r, c) = (e / width, e % width)
+        return b[c] + (0..<width).reduce(Float(0)) { $0 + h[r * width + $1] * w[$1 * width + c] }
+      }
+      if i < layers - 1 { h = h.map { 0.5 * $0 * (1 + Float(erf(Double($0) / 2.0.squareRoot()))) } }
+    }
+    for file in [gpu, npu] {
+      var interpreter = TFLiteInterpreter(file)
+      #expect(maxError(try interpreter.run(["x": x])["y"]!, h) < 1e-4)
+    }
+    // JETLINK_SWEEP_OUT=<directory>: the sweep's 64 MB case converted for the
+    // NPU, for android/scripts/mediatek-compile-check.sh.
+    if let out = ProcessInfo.processInfo.environment["JETLINK_SWEEP_OUT"], !out.isEmpty {
+      let big = dir.url.appendingPathComponent("big.onnx")
+      try SyntheticModels.writeLinearStack(layers: 8, width: 2048, rows: 128, to: big)
+      _ = try LiteRTPreparation.prepare(source: big, into: URL(fileURLWithPath: out, isDirectory: true), forNPU: true)
+    }
+  }
+
   /// A real model converted on request: JETLINK_LITERT_PREPARE=<model.onnx>.
   /// Every BATCH_MATMUL's two inputs share a rank of 2 to 4, which MediaTek's
   /// NeuroPilot requires: one that does not fails the APU's whole module.
@@ -150,10 +185,12 @@ import Testing
     // NPU there, for compiling it ahead of time on the PC
     // (android/scripts/mediatek-compile-check.sh).
     if let out = environment["JETLINK_LITERT_OUT"], !out.isEmpty {
-      _ = try LiteRTPreparation.prepare(source: model, into: URL(fileURLWithPath: out, isDirectory: true), uint8InputsAsFloat: true)
+      _ = try LiteRTPreparation.prepare(source: model, into: URL(fileURLWithPath: out, isDirectory: true), forNPU: true)
     }
-    let (file, report) = try Self.convert(model)
-    print("converted \(model.lastPathComponent): \(report.summary)")
+    // The GPU's conversion converts too; the checks are the NPU's.
+    print("converted for the GPU: \(try Self.convert(model).report.summary)")
+    let (file, report) = try Self.convert(model, forNPU: true)
+    print("converted \(model.lastPathComponent) for the NPU: \(report.summary)")
     var ops: [String: Int] = [:]
     for o in file.operators { ops[o.op, default: 0] += 1 }
     print("operators: \(ops.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))")

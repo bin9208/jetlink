@@ -56,6 +56,10 @@ typedef struct {
   // Whose NPU: JL_LITERT_NPU_GOOGLE_TENSOR or JL_LITERT_NPU_MEDIATEK, for
   // the vendor options the compile carries.
   int npu_vendor;
+  // A MediaTek APU compiled for its turbo boost, with its L1 cache and for
+  // low latency, rather than for a fast single answer alone (0): the NPU
+  // sweep's comparison.
+  int npu_tuned;
 } jl_litert_options;
 
 #define JL_LITERT_NPU_GOOGLE_TENSOR 0
