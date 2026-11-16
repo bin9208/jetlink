@@ -77,11 +77,12 @@ struct OnnxGraphBuilder {
   }
 
   /// The model converted by LiteRTPreparation, read back.
-  func convert() throws -> (file: TFLiteFile, report: LiteRTPreparation.Report) {
+  func convert(uint8InputsAsFloat: Bool = false) throws -> (file: TFLiteFile, report: LiteRTPreparation.Report) {
     let dir = try TemporaryDirectory()
     let source = dir.url.appendingPathComponent("model.onnx")
     try Data(bytes).write(to: source)
-    let report = try LiteRTPreparation.prepare(source: source, into: dir.url.appendingPathComponent("out"))
+    let report = try LiteRTPreparation.prepare(
+      source: source, into: dir.url.appendingPathComponent("out"), uint8InputsAsFloat: uint8InputsAsFloat)
     return (try TFLiteFile(report.url), report)
   }
 }

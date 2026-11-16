@@ -79,6 +79,37 @@ import Testing
     #expect(file.count("CAST") == 3)
     let out = try Self.run(file, ["h": [-2, 0.5, 1, 3], "img": [0, 1, 2, 255]])["o"]!
     #expect(out == [0, 1.5, 3, 258])
+
+    // For an NPU, img is a FLOAT32 input of the same values and its Casts go:
+    // MediaTek's APU cannot CAST uint8, and one left to the GPU beside it
+    // failed the compiled model.
+    let (npu, report) = try g.convert(uint8InputsAsFloat: true)
+    #expect(npu.inputs.map { npu.tensors[$0].type } == [TFLite.TensorType.float16.rawValue, TFLite.TensorType.float32.rawValue])
+    #expect(npu.count("CAST") == 2 && report.lowerings["uint8 inputs as FLOAT32"] == 1)
+    #expect(try Self.run(npu, ["h": [-2, 0.5, 1, 3], "img": [0, 1, 2, 255]])["o"]! == [0, 1.5, 3, 258])
+  }
+
+  /// A stateful graph's image queue for an NPU: the uint8 queue comes in and
+  /// goes back out, through a Cast to uint8, all FLOAT32 with no CAST.
+  @Test func anImageQueueStaysFloatForTheNPU() throws {
+    var g = OnnxGraphBuilder()
+    g.input("q", DataType.uint8, [1, 2, 4])
+    g.input("frame", DataType.uint8, [1, 1, 4])
+    g.node("Cast", ["q"], ["qf"], [.int("to", 1)])
+    g.node("Cast", ["frame"], ["ff"], [.int("to", 1)])
+    g.int64("starts", [1])
+    g.int64("ends", [2])
+    g.int64("axes", [1])
+    g.node("Slice", ["qf", "starts", "ends", "axes"], ["kept"])
+    g.node("Concat", ["kept", "ff"], ["nextf"], [.int("axis", 1)])
+    g.node("Cast", ["nextf"], ["next_q"], [.int("to", 2)])
+    g.output("next_q", DataType.uint8, [1, 2, 4])
+    let (file, report) = try g.convert(uint8InputsAsFloat: true)
+    #expect(file.count("CAST") == 0)
+    #expect((file.inputs + file.outputs).allSatisfy { file.tensors[$0].type == TFLite.TensorType.float32.rawValue })
+    #expect(report.lowerings["uint8 outputs as FLOAT32"] == 1 && report.lowerings["uint8 Casts kept FLOAT32"] == 1)
+    let out = try Self.run(file, ["q": [1, 2, 3, 4, 5, 6, 7, 8], "frame": [9, 10, 11, 255]])["next_q"]!
+    #expect(out == [5, 6, 7, 8, 9, 10, 11, 255])
   }
 
   // MARK: convolution

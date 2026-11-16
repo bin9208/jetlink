@@ -76,6 +76,8 @@ struct LiteRTLowering {
   var int32Tensors: [[[Int]]: Int] = [:]
   /// How often each special case fired, for the report: masks, views.
   var counts: [String: Int] = [:]
+  /// uint8 graph inputs become FLOAT32 ones (LiteRTPreparation.prepare).
+  var uint8InputsAsFloat = false
 
   private init(_ src: Source, opset: Int64, recorded: [String: [Int64]]) {
     self.src = src
@@ -84,8 +86,9 @@ struct LiteRTLowering {
   }
 
   /// Lowers `g`: its inputs, every node in order, its outputs.
-  static func lower(_ g: Graph, opset: Int64, _ src: Source) throws -> LiteRTLowering {
+  static func lower(_ g: Graph, opset: Int64, _ src: Source, uint8InputsAsFloat: Bool = false) throws -> LiteRTLowering {
     var l = LiteRTLowering(src, opset: opset, recorded: Patches.staticDims(g))
+    l.uint8InputsAsFloat = uint8InputsAsFloat
     l.nodes = g.nodes
     for (k, n) in g.nodes.enumerated() {
       for name in n.inputs where !name.isEmpty {
@@ -122,7 +125,12 @@ struct LiteRTLowering {
       guard let v = d.value, v > 0 else { throw OnnxError("input \(vi.key) has a dimension that is not fixed") }
       return Int(v)
     }
-    let edge = try Self.edgeType(vi.elemType, vi.key)
+    var edge = try Self.edgeType(vi.elemType, vi.key)
+    if edge == .uint8 && uint8InputsAsFloat {
+      // Its values 0...255 as floats, which the graph's Cast then leaves.
+      edge = .float32
+      count("uint8 inputs as FLOAT32")
+    }
     let view = Self.edgeView(dims)
     let index = addTensor(vi.key, view, edge)
     model.inputs.append(index)
@@ -141,7 +149,13 @@ struct LiteRTLowering {
 
   private mutating func output(_ vi: ValueInfo) throws {
     let name = vi.key
-    let type = try Self.edgeType(vi.elemType, name)
+    var type = try Self.edgeType(vi.elemType, name)
+    if type == .uint8 && uint8InputsAsFloat {
+      // A stateful graph's image queue, handed back for the next frame as
+      // the input it came from: FLOAT32 too.
+      type = .float32
+      count("uint8 outputs as FLOAT32")
+    }
     var index = try tensor(name)
     let view = Self.edgeView(model.tensors[index].shape)
     if view != model.tensors[index].shape {

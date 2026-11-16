@@ -82,8 +82,10 @@ public final class LiteRtBackend: EngineBackend {
   /// 3: every bias is a FLOAT32 constant (NeuroPilot's MDLA refused one
   /// behind a DEQUANTIZE). 4: a depthwise convolution over more than 512
   /// channels is split, and Expand's ones have the output's shape (what
-  /// MDLA could not hold or broadcast).
-  static let conversionVersion = 4
+  /// MDLA could not hold or broadcast). 5: for the NPU, uint8 inputs are
+  /// FLOAT32 (the APU cannot CAST them, and a CAST on the GPU beside it
+  /// failed the compiled model).
+  static let conversionVersion = 5
 
   /// How the NPU's compile is set up, kept with an artifact built for the
   /// NPU's profile. 1: LiteRT sees only the phone's vendor's compiler plugin
@@ -231,7 +233,7 @@ public final class LiteRtBackend: EngineBackend {
       let convertStarted = Date()
       let convertTook = (expect["convert_seconds"] as? NSNumber)?.doubleValue ?? 0
       let converted = try Ticker.during(interval: 1, Ticker.paced("convert", "converting the model for LiteRT", took: convertTook, report: report)) {
-        try LiteRTPreparation.prepare(source: model, into: staged)
+        try LiteRTPreparation.prepare(source: model, into: staged, uint8InputsAsFloat: profile == .npu)
       }
       let convertSeconds = Date().timeIntervalSince(convertStarted)
       log.info("converted \(model.lastPathComponent): \(converted.summary)")
@@ -262,24 +264,30 @@ public final class LiteRtBackend: EngineBackend {
       let took = (expect["compile_seconds"] as? NSNumber)?.doubleValue ?? target.expectedCompileSeconds
       report("compile", 0, what)
       let compileStarted = Date()
-      let compile = {
+      let compile = { (on: LiteRtProfile, what: String, took: Double) in
         try Ticker.during(interval: 1, Ticker.paced("compile", what, took: took, report: report)) {
-          let engine = try self.engine(staged, cacheKey: LiteRtArtifact.cacheKey(artifact), on: target)
+          let engine = try self.engine(staged, cacheKey: LiteRtArtifact.cacheKey(artifact), on: on)
           defer { engine.close() }
           return engine.hardware
         }
       }
       let hardware: LiteRtProfile
+      var refusal: [String] = []
       do {
-        hardware = try target == .npu ? attempt.during(compile) : compile()
+        hardware = try target == .npu ? attempt.during { try compile(target, what, took) } : compile(target, what, took)
       } catch {
-        if target == .npu { copyLiteRtLog(since: compileStarted) }
-        throw error
+        guard target == .npu else { throw error }
+        // The NPU's compile can fail after the plugin took the model: the
+        // compiled model then fails to come together (an op left to the GPU
+        // beside the APU's partition did, on a MediaTek). The GPU runs it.
+        refusal = copyLiteRtLog(since: compileStarted)
+        log.warning("the model compiled for the NPU did not load (\(error)), so \(model.lastPathComponent) runs on the GPU")
+        report("compile", 0, "compiling for the GPU")
+        hardware = try compile(.gpu, "compiling for the GPU", LiteRtProfile.gpu.expectedCompileSeconds)
       }
       let compileSeconds = Date().timeIntervalSince(compileStarted)
       report("compile", 1, "compiled in \(Int(compileSeconds.rounded())) s")
-      var refusal: [String] = []
-      if hardware != target {
+      if hardware != target && refusal.isEmpty {
         log.warning("the NPU's compiler could not take \(model.lastPathComponent), so it runs on the GPU; LiteRT's lines below say why")
         refusal = copyLiteRtLog(since: compileStarted)
       }

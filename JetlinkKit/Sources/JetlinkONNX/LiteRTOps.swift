@@ -248,6 +248,13 @@ extension LiteRTLowering {
         try alias(n.outputs[0], v)
         return
       }
+      if uint8InputsAsFloat && target == .uint8 && model.tensors[i].type == .float32 {
+        // The image values stay FLOAT32 for the NPU, as the inputs they
+        // came from are: 0...255 already.
+        try alias(n.outputs[0], v)
+        count("uint8 Casts kept FLOAT32")
+        return
+      }
       let o = try define(n.outputs[0], model.tensors[i].shape, target)
       emit(.cast, [i], [o], .cast(from: model.tensors[i].type, to: target))
     }

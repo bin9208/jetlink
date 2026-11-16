@@ -62,21 +62,27 @@ public enum LiteRTPreparation {
   /// Where each buffer after the flatbuffer starts: a multiple of this.
   static let alignment = 64
 
-  public static func prepare(source: URL, into directory: URL) throws -> Report {
+  /// `uint8InputsAsFloat` makes the graph's uint8 inputs (the camera
+  /// images, N16's route map) FLOAT32 ones holding the same 0...255, for an
+  /// NPU: MediaTek's APU cannot CAST uint8 to float, and a CAST that LiteRT
+  /// left to the GPU between the input and the APU's partition failed the
+  /// compiled model ("Failed to register buffer requirement"). The host
+  /// stages any input type.
+  public static func prepare(source: URL, into directory: URL, uint8InputsAsFloat: Bool = false) throws -> Report {
     let data = try Data(contentsOf: source, options: .alwaysMapped)
     return try data.withUnsafeBytes { buf in
-      try prepare(Source(bytes: buf), into: directory)
+      try prepare(Source(bytes: buf), into: directory, uint8InputsAsFloat: uint8InputsAsFloat)
     }
   }
 
-  private static func prepare(_ src: Source, into directory: URL) throws -> Report {
+  private static func prepare(_ src: Source, into directory: URL, uint8InputsAsFloat: Bool) throws -> Report {
     var (model, g) = try Decode.preparable(src)
     let stripped = try Patches.stripTinygradOps(&g, &model.opsets)
     guard let opset = model.opsets.first(where: { $0.domain.isEmpty || $0.domain == "ai.onnx" })?.version else {
       throw OnnxError("the model imports no default-domain opset")
     }
 
-    var lowered = try LiteRTLowering.lower(g, opset: opset, src)
+    var lowered = try LiteRTLowering.lower(g, opset: opset, src, uint8InputsAsFloat: uint8InputsAsFloat)
     var removed = 0
     var fused = 0
     var moved = 0

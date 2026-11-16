@@ -146,10 +146,11 @@ import Testing
   func aRealModelSuitsTheAPU() throws {
     let environment = ProcessInfo.processInfo.environment
     let model = URL(fileURLWithPath: environment["JETLINK_LITERT_PREPARE"]!)
-    // JETLINK_LITERT_OUT=<directory> keeps the converted model there, for
-    // compiling it ahead of time for an NPU on the PC.
+    // JETLINK_LITERT_OUT=<directory> keeps the model converted as for the
+    // NPU there, for compiling it ahead of time on the PC
+    // (android/scripts/mediatek-compile-check.sh).
     if let out = environment["JETLINK_LITERT_OUT"], !out.isEmpty {
-      _ = try LiteRTPreparation.prepare(source: model, into: URL(fileURLWithPath: out, isDirectory: true))
+      _ = try LiteRTPreparation.prepare(source: model, into: URL(fileURLWithPath: out, isDirectory: true), uint8InputsAsFloat: true)
     }
     let (file, report) = try Self.convert(model)
     print("converted \(model.lastPathComponent): \(report.summary)")
