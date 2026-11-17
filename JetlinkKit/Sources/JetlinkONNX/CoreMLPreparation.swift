@@ -82,7 +82,7 @@ public enum CoreMLPreparation {
     public static func == (a: Report, b: Report) -> Bool {
       a.stripped == b.stripped && a.retypedImages == b.retypedImages && a.gathers == b.gathers && a.gemms == b.gemms
         && a.tiles == b.tiles && a.norms == b.norms && a.heads == b.heads && a.masks == b.masks && a.parts == b.parts
-        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.safeNorms == b.safeNorms && a.gelus == b.gelus && a.stateIO == b.stateIO && a.probes.map(\.name) == b.probes.map(\.name)
+        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.safeNorms == b.safeNorms && a.gelus == b.gelus && a.stateIO == b.stateIO && a.foldedNormalizations == b.foldedNormalizations && a.probes.map(\.name) == b.probes.map(\.name)
     }
     /// tinygrad layout ops bypassed.
     public let stripped: Int
@@ -116,6 +116,9 @@ public enum CoreMLPreparation {
     /// State queue pairs made fp16 at the graph's edge (`fp16StateIO`); 0
     /// unless the layout is `.hexagonWhole`.
     public var stateIO: Int = 0
+    /// Image normalizations folded into the convolution after them
+    /// (`foldInputNormalization`); 0 unless the layout is `.hexagonWhole`.
+    public var foldedNormalizations: Int = 0
     /// The tensors made graph outputs for a probe, in graph order, with the
     /// op that writes each (`Patches.addProbes`); empty unless asked for.
     public var probes: [(name: String, op: String)] = []
@@ -158,7 +161,10 @@ public enum CoreMLPreparation {
     var (model, g) = try Decode.preparable(src)
 
     let stripped = try Patches.stripTinygradOps(&g, &model.opsets)
-    let retyped = Patches.needsPatch(g)
+    // The Hexagon NPU takes the uint8 images as they are, half the bytes
+    // across each run (N16's image queue 3.9 MB each way as fp16), and casts
+    // them where the graph always did; CoreML has no uint8.
+    let retyped = Patches.needsPatch(g) && layout != .hexagonWhole
     if retyped {
       try Patches.patchUint8Inputs(&g)
     }
@@ -178,6 +184,7 @@ public enum CoreMLPreparation {
     var safeNorms = 0
     var gelus = 0
     var stateIO = 0
+    var folded = 0
     if layout == .aneWhole {
       norms = try Patches.prescaleLayerNorm(&g)
       heads = try Patches.headsInFP32(&g, src)
@@ -190,6 +197,7 @@ public enum CoreMLPreparation {
       heads = try Patches.headsInFP32(&g, src)
       visionNorms = try Patches.prescaleVisionLayerNorm(&g)
       stateIO = Patches.fp16StateIO(&g)
+      folded = try Patches.foldInputNormalization(&g, src)
       // Not Patches.tanhGelu: QNN runs the native Gelu well. On a Snapdragon
       // 8 Gen 2 the tanh form took Light Speed 2 from 84 M NPU cycles a run
       // to 168 M (33.4 ms to 39.3 ms a frame) and twice as far from the CPU.
@@ -226,6 +234,7 @@ public enum CoreMLPreparation {
     report.safeNorms = safeNorms
     report.gelus = gelus
     report.stateIO = stateIO
+    report.foldedNormalizations = folded
     report.probes = probed
     return report
   }

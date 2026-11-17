@@ -550,6 +550,84 @@ enum Patches {
     return done
   }
 
+  // MARK: fold_input_normalization
+
+  /// Folds `Div(Sub(x, mean), std)` into the convolution that alone reads it,
+  /// when that convolution pads nothing (a patchify stem): conv(W, (x-m)/s)
+  /// is conv(W/s, x) + b - sum(W m/s), exactly, with no padding to tell the
+  /// two apart. `mean` and `std` are per input channel ([1, C, 1, 1]). The
+  /// new weights are made in fp32 and stored as the old ones were. Returns
+  /// how many.
+  ///
+  /// carrot's N16 normalizes its 24-channel image stack ([1, 24, 128, 256])
+  /// this way before a 4x4 stride-4 stem; on a Snapdragon 8 Gen 2 the Sub
+  /// and the Div took 1.35 M of the NPU's 85 M cycles a run.
+  static func foldInputNormalization(_ g: inout Graph, _ src: Source) throws -> Int {
+    var producer: [String: Int] = [:]
+    var readers: [String: [Int]] = [:]
+    for (i, n) in g.nodes.enumerated() {
+      for o in n.outputs { producer[o] = i }
+      for x in n.inputs { readers[x, default: []].append(i) }
+    }
+    let outputs = Set(g.outputs.map(\.key))
+    var inits: [String: Int] = [:]
+    for (i, t) in g.initializers.enumerated() { inits[t.key] = i }
+    func floats(_ name: String) throws -> (values: [Float], type: Int32, dims: [Int64])? {
+      guard let i = inits[name] else { return nil }
+      let t = g.initializers[i]
+      guard t.elementType == DataType.float16 || t.elementType == DataType.float else { return nil }
+      return (try Elements.floats(Elements.littleEndian(t, src), as: t.elementType, for: name), t.elementType, t.dims)
+    }
+    var drop = Set<Int>()
+    var done = 0
+    for (c, conv) in g.nodes.enumerated() where conv.op == "Conv" && conv.inputs.count >= 2 {
+      let pads = conv.attribute("pads")?.ints ?? []
+      let autoPad = conv.attribute("auto_pad")?.s ?? "NOTSET"
+      guard pads.allSatisfy({ $0 == 0 }), autoPad == "NOTSET" || autoPad == "VALID", (conv.attribute("group")?.i ?? 1) == 1,
+        let d = producer[conv.inputs[0]], g.nodes[d].op == "Div", readers[conv.inputs[0]] == [c], !outputs.contains(conv.inputs[0]),
+        let sb = producer[g.nodes[d].inputs[0]], g.nodes[sb].op == "Sub", readers[g.nodes[d].inputs[0]] == [d],
+        let std = try floats(g.nodes[d].inputs[1]), let mean = try floats(g.nodes[sb].inputs[1]),
+        let w = try floats(conv.inputs[1]), w.dims.count == 4
+      else { continue }
+      let (o, ch, kh, kw) = (Int(w.dims[0]), Int(w.dims[1]), Int(w.dims[2]), Int(w.dims[3]))
+      guard std.values.count == ch, mean.values.count == ch, std.values.allSatisfy({ $0 != 0 }) else { continue }
+      var bias = [Float](repeating: 0, count: o)
+      var biasType = w.type
+      if conv.inputs.count > 2, !conv.inputs[2].isEmpty {
+        guard let b = try floats(conv.inputs[2]), b.values.count == o else { continue }
+        bias = b.values
+        biasType = b.type
+      }
+      var weights = w.values
+      let k = kh * kw
+      for oc in 0..<o {
+        var shift: Float = 0
+        for ic in 0..<ch {
+          let scale = 1 / std.values[ic]
+          for j in 0..<k {
+            let at = (oc * ch + ic) * k + j
+            shift += weights[at] * mean.values[ic] * scale
+            weights[at] *= scale
+          }
+        }
+        bias[oc] -= shift
+      }
+      let wName = "\(conv.inputs[1])__folded"
+      let bName = "\(conv.displayName)__folded_bias"
+      g.initializers.append(Tensor(name: wName, dims: w.dims, dataType: w.type, raw: .owned(Elements.encode(weights, as: w.type))))
+      g.initializers.append(Tensor(name: bName, dims: [Int64(o)], dataType: biasType, raw: .owned(Elements.encode(bias, as: biasType))))
+      var node = g.nodes[c]
+      node.inputs = [g.nodes[sb].inputs[0], wName, bName]
+      g.nodes[c] = node
+      drop.formUnion([d, sb])
+      done += 1
+    }
+    if !drop.isEmpty {
+      g.nodes = g.nodes.enumerated().filter { !drop.contains($0.offset) }.map(\.element)
+    }
+    return done
+  }
+
   // MARK: fp16_state_io
 
   /// Makes a stateful graph's fp32 queues (`state_X` in, `next_state_X` out)

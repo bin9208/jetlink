@@ -175,3 +175,44 @@ import Testing
     #expect(g.nodes.first { $0.outputs == ["outputs"] }?.inputs == ["state_feat_q__fp32"])
   }
 }
+
+@Suite struct FoldNormalizationTests {
+  private let none = Source(bytes: UnsafeRawBufferPointer(start: nil, count: 0))
+
+  @Test func aNormalizationBeforeAnUnpaddedConvGoesIntoItsWeights() throws {
+    var b = OnnxGraphBuilder(opset: 20)
+    b.input("x", DataType.float16, [1, 2, 2, 2])
+    b.fp16("mean", [1, 2, 1, 1], [10, 20])
+    b.fp16("std", [1, 2, 1, 1], [2, 4])
+    b.fp16("w", [1, 2, 2, 2], [1, 1, 1, 1, 2, 2, 2, 2])
+    b.fp16("b", [1], [0.5])
+    b.node("Sub", ["x", "mean"], ["s"])
+    b.node("Div", ["s", "std"], ["d"])
+    b.node("Conv", ["d", "w", "b"], ["y"], [.ints("pads", [0, 0, 0, 0]), .ints("strides", [2, 2])])
+    b.output("y", DataType.float16, [1, 1, 1, 1])
+    var g = b.graph
+    #expect(try Patches.foldInputNormalization(&g, none) == 1)
+    #expect(g.nodes.map(\.op) == ["Conv"])
+    let conv = g.nodes[0]
+    #expect(conv.inputs[0] == "x")
+    let w = try Elements.floats(Elements.littleEndian(try #require(g.initializers.first { $0.key == conv.inputs[1] }), none), as: DataType.float16, for: "w")
+    let bias = try Elements.floats(Elements.littleEndian(try #require(g.initializers.first { $0.key == conv.inputs[2] }), none), as: DataType.float16, for: "b")
+    #expect(w == [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5])
+    // 0.5 - (4 * 1 * 10 / 2 + 4 * 2 * 20 / 4) = 0.5 - (20 + 40)
+    #expect(bias == [-59.5])
+  }
+
+  @Test func aPaddedConvKeepsItsNormalization() throws {
+    var b = OnnxGraphBuilder(opset: 20)
+    b.input("x", DataType.float16, [1, 1, 2, 2])
+    b.fp16("mean", [1, 1, 1, 1], [10])
+    b.fp16("std", [1, 1, 1, 1], [2])
+    b.fp16("w", [1, 1, 3, 3], Array(repeating: 1, count: 9))
+    b.node("Sub", ["x", "mean"], ["s"])
+    b.node("Div", ["s", "std"], ["d"])
+    b.node("Conv", ["d", "w"], ["y"], [.ints("pads", [1, 1, 1, 1])])
+    b.output("y", DataType.float16, [1, 1, 2, 2])
+    var g = b.graph
+    #expect(try Patches.foldInputNormalization(&g, none) == 0)
+  }
+}
