@@ -185,9 +185,9 @@ public enum CoreMLPreparation {
       norms = try Patches.prescaleLayerNorm(&g)
       heads = try Patches.headsInFP32(&g, src)
       visionNorms = try Patches.prescaleVisionLayerNorm(&g)
-      // QNN's profile on a Snapdragon 8 Gen 2: N16's exact GELUs about 29%
-      // of the NPU's cycles
-      gelus = Patches.tanhGelu(&g)
+      // Not Patches.tanhGelu: QNN runs the native Gelu well. On a Snapdragon
+      // 8 Gen 2 the tanh form took Light Speed 2 from 84 M NPU cycles a run
+      // to 168 M (33.4 ms to 39.3 ms a frame) and twice as far from the CPU.
     }
     if layout == .aneWhole || layout == .hexagonWhole {
       biasMasks = try Patches.additiveSoftmaxMasks(&g, src)
