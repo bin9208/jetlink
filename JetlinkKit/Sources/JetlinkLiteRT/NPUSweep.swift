@@ -35,16 +35,18 @@ extension LiteRtBackend {
 
   static let sweepRuns = 5
 
+  /// The GPU's first: carrot.20's sweep never reached them. Its options
+  /// for the APU (--num-mdla=2, --opt=3, --fc-to-conv, all three) all
+  /// reached the compiler (each compiled to another size) and none made
+  /// the model faster (115 to 155 ms against the default's 120 to 156);
+  /// turbo boost with the L1 cache and the low-latency hint killed the app
+  /// in the compile, three times, so it is gone.
   static let sweepCases: [SweepCase] = [
-    SweepCase(name: "NPU default", npu: true, int8: false),
-    SweepCase(name: "NPU --num-mdla=2", npu: true, int8: false, options: "--num-mdla=2"),
-    SweepCase(name: "NPU --opt=3", npu: true, int8: false, options: "--opt=3"),
-    SweepCase(name: "NPU --fc-to-conv", npu: true, int8: false, options: "--fc-to-conv"),
-    SweepCase(name: "NPU --num-mdla=2 --opt=3 --fc-to-conv", npu: true, int8: false, options: "--num-mdla=2 --opt=3 --fc-to-conv"),
-    SweepCase(name: "NPU the same, turbo", npu: true, int8: false, options: "--num-mdla=2 --opt=3 --fc-to-conv", tuned: true),
-    SweepCase(name: "NPU the same, multi-core", npu: true, int8: false, options: "--num-mdla=2 --opt=3 --fc-to-conv", multiCore: true),
     SweepCase(name: "GPU fp16", npu: false, int8: false),
     SweepCase(name: "GPU int8", npu: false, int8: true),
+    SweepCase(name: "NPU default", npu: true, int8: false),
+    SweepCase(name: "NPU multi-core", npu: true, int8: false, multiCore: true),
+    SweepCase(name: "NPU --num-mdla=2, multi-core", npu: true, int8: false, options: "--num-mdla=2", multiCore: true),
   ]
 
   public func afterBenchmark(model: URL?, directory: URL, progress: @escaping (String) -> Void) -> [String] {
