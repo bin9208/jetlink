@@ -556,8 +556,12 @@ enum Patches {
   /// int8, one scale per output channel (symmetric, zero point 0), read
   /// through a DequantizeLinear to the type they had: a quarter of fp32's
   /// bytes and half of fp16's for the NPU to read each run, if QNN runs them
-  /// so. Returns how many. Before the Gemm rewrite, which leaves its
-  /// weights transposed and unread until written.
+  /// so. Returns how many. Last of the patches, as the norms' vision mask
+  /// reads the graph as exported; a weight the Gemm rewrite transposes is
+  /// transposed here first.
+  /// Each DequantizeLinear sits just before what reads it: carrot.40-test
+  /// put them all first and a Galaxy Tab S9's NPU, holding every widened
+  /// weight at once, could not create the context (QNN error 1002).
   static func int8Weights(_ g: inout Graph, _ src: Source, minimum: Int = 65_536) throws -> Int {
     var inits: [String: Int] = [:]
     for (i, t) in g.initializers.enumerated() { inits[t.key] = i }
@@ -565,7 +569,7 @@ enum Patches {
     for n in g.nodes { for x in n.inputs { readers[x, default: 0] += 1 } }
     var done: [String: String] = [:]
     var added: [Tensor] = []
-    var dequant: [Node] = []
+    var dequant: [Int: [Node]] = [:]
     var replaced = Set<String>()
     for (k, node) in g.nodes.enumerated() where ["MatMul", "Gemm", "Conv"].contains(node.op) && node.inputs.count >= 2 {
       let name = node.inputs[1]
@@ -576,7 +580,6 @@ enum Patches {
       guard let i = inits[name] else { continue }
       let t = g.initializers[i]
       guard t.elementType == DataType.float16 || t.elementType == DataType.float, t.elementCount >= minimum, t.dims.count >= 2 else { continue }
-      if case .transposed = t.raw { continue }
       if case .widened = t.raw { continue }
       // the output channel's axis: B's columns, a Gemm's rows when transB, a Conv's first
       let axis: Int
@@ -587,7 +590,24 @@ enum Patches {
       case "Gemm": axis = (node.attribute("transB")?.i ?? 0) == 1 ? 0 : 1
       default: axis = 0
       }
-      let values = try Elements.floats(Elements.littleEndian(t, src), as: t.elementType, for: name)
+      let values: [Float]
+      if case .transposed(let tr) = t.raw {
+        // the Gemm rewrite's [rows, cols] weight, as the [cols, rows] it writes
+        let bytes: [UInt8]
+        switch tr.elements {
+        case .source(let r): bytes = Array(src.slice(r))
+        case .owned(let b): bytes = b
+        case .typed: continue
+        }
+        let v = try Elements.floats(bytes, as: t.elementType, for: name)
+        var out = [Float](repeating: 0, count: v.count)
+        for r in 0..<tr.rows {
+          for c in 0..<tr.cols { out[c * tr.rows + r] = v[r * tr.cols + c] }
+        }
+        values = out
+      } else {
+        values = try Elements.floats(Elements.littleEndian(t, src), as: t.elementType, for: name)
+      }
       let dims = t.dims.map(Int.init)
       let channels = dims[axis]
       let inner = dims[(axis + 1)...].reduce(1, *)
@@ -618,7 +638,8 @@ enum Patches {
       added.append(Tensor(name: qName, dims: t.dims, dataType: DataType.int8, raw: .owned(q)))
       added.append(Tensor(name: sName, dims: [Int64(channels)], dataType: t.elementType, raw: .owned(Elements.encode(scale, as: t.elementType))))
       added.append(Tensor(name: zName, dims: [Int64(channels)], dataType: DataType.int8, raw: .owned([UInt8](repeating: 0, count: channels))))
-      dequant.append(Node(inputs: [qName, sName, zName], outputs: [out], name: out, opType: "DequantizeLinear", attributes: [.int("axis", Int64(axis))]))
+      dequant[k, default: []].append(
+        Node(inputs: [qName, sName, zName], outputs: [out], name: out, opType: "DequantizeLinear", attributes: [.int("axis", Int64(axis))]))
       done[name] = out
       g.nodes[k].inputs[1] = out
       replaced.insert(name)
@@ -629,86 +650,14 @@ enum Patches {
     for n in g.nodes { still.formUnion(n.inputs) }
     g.initializers.removeAll { replaced.contains($0.key) && !still.contains($0.key) }
     g.initializers.append(contentsOf: added)
-    g.nodes = dequant + g.nodes
+    var nodes: [Node] = []
+    nodes.reserveCapacity(g.nodes.count + done.count)
+    for (k, n) in g.nodes.enumerated() {
+      nodes.append(contentsOf: dequant[k] ?? [])
+      nodes.append(n)
+    }
+    g.nodes = nodes
     return done.count
-  }
-
-  // MARK: fold_input_normalization
-
-  /// Folds `Div(Sub(x, mean), std)` into the convolution that alone reads it,
-  /// when that convolution pads nothing (a patchify stem): conv(W, (x-m)/s)
-  /// is conv(W/s, x) + b - sum(W m/s), exactly, with no padding to tell the
-  /// two apart. `mean` and `std` are per input channel ([1, C, 1, 1]). The
-  /// new weights are made in fp32 and stored as the old ones were. Returns
-  /// how many.
-  ///
-  /// carrot's N16 normalizes its 24-channel image stack ([1, 24, 128, 256])
-  /// this way before a 4x4 stride-4 stem; on a Snapdragon 8 Gen 2 the Sub
-  /// and the Div took 1.35 M of the NPU's 85 M cycles a run.
-  static func foldInputNormalization(_ g: inout Graph, _ src: Source) throws -> Int {
-    var producer: [String: Int] = [:]
-    var readers: [String: [Int]] = [:]
-    for (i, n) in g.nodes.enumerated() {
-      for o in n.outputs { producer[o] = i }
-      for x in n.inputs { readers[x, default: []].append(i) }
-    }
-    let outputs = Set(g.outputs.map(\.key))
-    var inits: [String: Int] = [:]
-    for (i, t) in g.initializers.enumerated() { inits[t.key] = i }
-    func floats(_ name: String) throws -> (values: [Float], type: Int32, dims: [Int64])? {
-      guard let i = inits[name] else { return nil }
-      let t = g.initializers[i]
-      guard t.elementType == DataType.float16 || t.elementType == DataType.float else { return nil }
-      return (try Elements.floats(Elements.littleEndian(t, src), as: t.elementType, for: name), t.elementType, t.dims)
-    }
-    var drop = Set<Int>()
-    var done = 0
-    for (c, conv) in g.nodes.enumerated() where conv.op == "Conv" && conv.inputs.count >= 2 {
-      let pads = conv.attribute("pads")?.ints ?? []
-      let autoPad = conv.attribute("auto_pad")?.s ?? "NOTSET"
-      guard pads.allSatisfy({ $0 == 0 }), autoPad == "NOTSET" || autoPad == "VALID", (conv.attribute("group")?.i ?? 1) == 1,
-        let d = producer[conv.inputs[0]], g.nodes[d].op == "Div", readers[conv.inputs[0]] == [c], !outputs.contains(conv.inputs[0]),
-        let sb = producer[g.nodes[d].inputs[0]], g.nodes[sb].op == "Sub", readers[g.nodes[d].inputs[0]] == [d],
-        let std = try floats(g.nodes[d].inputs[1]), let mean = try floats(g.nodes[sb].inputs[1]),
-        let w = try floats(conv.inputs[1]), w.dims.count == 4
-      else { continue }
-      let (o, ch, kh, kw) = (Int(w.dims[0]), Int(w.dims[1]), Int(w.dims[2]), Int(w.dims[3]))
-      guard std.values.count == ch, mean.values.count == ch, std.values.allSatisfy({ $0 != 0 }) else { continue }
-      var bias = [Float](repeating: 0, count: o)
-      var biasType = w.type
-      if conv.inputs.count > 2, !conv.inputs[2].isEmpty {
-        guard let b = try floats(conv.inputs[2]), b.values.count == o else { continue }
-        bias = b.values
-        biasType = b.type
-      }
-      var weights = w.values
-      let k = kh * kw
-      for oc in 0..<o {
-        var shift: Float = 0
-        for ic in 0..<ch {
-          let scale = 1 / std.values[ic]
-          for j in 0..<k {
-            let at = (oc * ch + ic) * k + j
-            shift += weights[at] * mean.values[ic] * scale
-            weights[at] *= scale
-          }
-        }
-        bias[oc] -= shift
-      }
-      let wName = "\(conv.inputs[1])__folded"
-      let bName = "\(conv.displayName)__folded_bias"
-      g.initializers.append(Tensor(name: wName, dims: w.dims, dataType: w.type, raw: .owned(Elements.encode(weights, as: w.type))))
-      g.initializers.append(Tensor(name: bName, dims: [Int64(o)], dataType: biasType, raw: .owned(Elements.encode(bias, as: biasType))))
-      var node = g.nodes[c]
-      node.inputs = [g.nodes[sb].inputs[0], wName, bName]
-      g.nodes[c] = node
-      drop.formUnion([d, sb])
-      done += 1
-    }
-    if !drop.isEmpty {
-      g.nodes = g.nodes.enumerated().filter { !drop.contains($0.offset) }.map(\.element)
-    }
-    return done
   }
 
   // MARK: fp16_state_io

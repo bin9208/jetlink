@@ -84,13 +84,14 @@ public enum OrtProfile: String, CaseIterable, Sendable {
   /// and was dropped), 13 with the state queues fp16 at the graph's edge, 14 with the images uint8 at the edge and their normalization folded
   /// (the uint8 images moved part of the graph to the CPU), 15 with the
   /// normalization folded alone, 16 with it and int8 weights the test app's
-  /// experiments (tagged in the artifact's name). An artifact prepared under
+  /// experiments (tagged in the artifact's name), 17 with int8 alone (the fold put
+  /// N16's lead 8.4 m from the CPU's, not 2.1) and last. An artifact prepared under
   /// another rebuilds.
   public var prepareVersion: Int {
     switch layout {
     case .plain: 6
     case .aneWhole: 8
-    case .hexagonWhole: 16
+    case .hexagonWhole: 17
     case .split, .whole: 5
     }
   }

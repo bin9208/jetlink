@@ -70,8 +70,6 @@ public enum CoreMLPreparation {
   /// What a test build may try on the Hexagon NPU beyond what it ships,
   /// each measured against the rest (the test app's experiment sweep).
   public enum Experiment: String, CaseIterable, Sendable, Comparable {
-    /// The image normalization folded into the stem (`foldInputNormalization`).
-    case fold
     /// Big weights as int8 with a DequantizeLinear (`int8Weights`).
     case int8
 
@@ -103,7 +101,7 @@ public enum CoreMLPreparation {
     public static func == (a: Report, b: Report) -> Bool {
       a.stripped == b.stripped && a.retypedImages == b.retypedImages && a.gathers == b.gathers && a.gemms == b.gemms
         && a.tiles == b.tiles && a.norms == b.norms && a.heads == b.heads && a.masks == b.masks && a.parts == b.parts
-        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.safeNorms == b.safeNorms && a.gelus == b.gelus && a.stateIO == b.stateIO && a.foldedNormalizations == b.foldedNormalizations && a.int8Weights == b.int8Weights && a.probes.map(\.name) == b.probes.map(\.name)
+        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.safeNorms == b.safeNorms && a.gelus == b.gelus && a.stateIO == b.stateIO && a.int8Weights == b.int8Weights && a.probes.map(\.name) == b.probes.map(\.name)
     }
     /// tinygrad layout ops bypassed.
     public let stripped: Int
@@ -137,9 +135,6 @@ public enum CoreMLPreparation {
     /// State queue pairs made fp16 at the graph's edge (`fp16StateIO`); 0
     /// unless the layout is `.hexagonWhole`.
     public var stateIO: Int = 0
-    /// Image normalizations folded into the convolution after them
-    /// (`foldInputNormalization`); 0 unless the layout is `.hexagonWhole`.
-    public var foldedNormalizations: Int = 0
     /// Weights made int8 (`int8Weights`); 0 unless asked for.
     public var int8Weights: Int = 0
     /// The tensors made graph outputs for a probe, in graph order, with the
@@ -198,16 +193,6 @@ public enum CoreMLPreparation {
     var gemms = 0
     var tiles = 0
     var int8 = 0
-    var folded = 0
-    if layout == .hexagonWhole {
-      // the fold first, while the stem's weights are still an initializer
-      if experiments.contains(.fold) {
-        folded = try Patches.foldInputNormalization(&g, src)
-      }
-      if experiments.contains(.int8) {
-        int8 = try Patches.int8Weights(&g, src)
-      }
-    }
     if layout != .plain {
       gathers = try Patches.normalizeGatherIndices(&g, src)
       gemms = try Patches.gemmWithTransposedWeight(&g, src)
@@ -241,6 +226,9 @@ public enum CoreMLPreparation {
       biasMasks = try Patches.additiveSoftmaxMasks(&g, src)
       masks = try Patches.finiteSoftmaxMasks(&g, src)
     }
+    if layout == .hexagonWhole && experiments.contains(.int8) {
+      int8 = try Patches.int8Weights(&g, src)
+    }
     var probed: [(name: String, op: String)] = []
     if let probeRequest {
       probed = Patches.addProbes(&g, probeRequest)
@@ -269,7 +257,6 @@ public enum CoreMLPreparation {
     report.safeNorms = safeNorms
     report.gelus = gelus
     report.stateIO = stateIO
-    report.foldedNormalizations = folded
     report.int8Weights = int8
     report.probes = probed
     return report

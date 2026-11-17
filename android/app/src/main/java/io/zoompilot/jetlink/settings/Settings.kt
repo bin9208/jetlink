@@ -139,12 +139,11 @@ data class SettingsValues(
      * `CoreMLPreparation.Experiment`), what the driving model is built with;
      * each benchmark also compares every other combination.
      */
-    val experiments: Set<String> = setOf("fold"),
+    val experiments: Set<String> = emptySet(),
 )
 
 /** The test app's NPU experiments: id, title, what it does. */
 val NPU_EXPERIMENTS = listOf(
-    Triple("fold", "Fold Image Normalization", "The image normalization put into the first convolution's weights."),
     Triple("int8", "Int8 Weights", "Big weights stored as int8 (half the bytes), widened on the NPU."),
 )
 
@@ -180,7 +179,9 @@ class Settings(context: Context) {
             keepCpuAwake = prefs.getBoolean(KEEP_CPU_AWAKE, defaults.keepCpuAwake),
             keepScreenOn = prefs.getBoolean(KEEP_SCREEN_ON, defaults.keepScreenOn),
             developer = prefs.getBoolean(DEVELOPER, Chip.isEmulator),
-            experiments = prefs.getStringSet(EXPERIMENTS, null)?.toSet() ?: defaults.experiments,
+            // an experiment dropped since (fold, carrot.41) is forgotten
+            experiments = prefs.getStringSet(EXPERIMENTS, null)?.toSet()?.filter { id -> NPU_EXPERIMENTS.any { it.first == id } }?.toSet()
+                ?: defaults.experiments,
         )
     }
 
