@@ -74,21 +74,24 @@ public enum LiteRTPreparation {
   ///   over more than 512 channels is split, and Expand's ones have the
   ///   output's shape: what NeuroPilot refused otherwise.
   /// The GPU keeps the lowering it was fastest with.
-  public static func prepare(source: URL, into directory: URL, forNPU: Bool = false) throws -> Report {
+  /// `int8Weights` (with `forNPU`) stores the MatMuls' weights int8, one
+  /// scale per output channel, behind a DEQUANTIZE: half the bytes an NPU
+  /// streams each run.
+  public static func prepare(source: URL, into directory: URL, forNPU: Bool = false, int8Weights: Bool = false) throws -> Report {
     let data = try Data(contentsOf: source, options: .alwaysMapped)
     return try data.withUnsafeBytes { buf in
-      try prepare(Source(bytes: buf), into: directory, forNPU: forNPU)
+      try prepare(Source(bytes: buf), into: directory, forNPU: forNPU, int8Weights: int8Weights)
     }
   }
 
-  private static func prepare(_ src: Source, into directory: URL, forNPU: Bool) throws -> Report {
+  private static func prepare(_ src: Source, into directory: URL, forNPU: Bool, int8Weights: Bool) throws -> Report {
     var (model, g) = try Decode.preparable(src)
     let stripped = try Patches.stripTinygradOps(&g, &model.opsets)
     guard let opset = model.opsets.first(where: { $0.domain.isEmpty || $0.domain == "ai.onnx" })?.version else {
       throw OnnxError("the model imports no default-domain opset")
     }
 
-    var lowered = try LiteRTLowering.lower(g, opset: opset, src, forNPU: forNPU)
+    var lowered = try LiteRTLowering.lower(g, opset: opset, src, forNPU: forNPU, int8Weights: int8Weights)
     var removed = 0
     var fused = 0
     var moved = 0

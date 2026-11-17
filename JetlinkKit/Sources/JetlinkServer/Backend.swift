@@ -90,9 +90,10 @@ public protocol EngineBackend: AnyObject, Sendable {
   /// for a backend that cannot (`AuxHub`).
   var aux: (any AuxBackend)? { get }
   /// What the backend measures after a benchmark, beside the model: LiteRT's
-  /// NPU sweep on a MediaTek phone. Works in `directory`, says how far it is
-  /// through `progress`, and returns lines for the log. Nothing by default.
-  func afterBenchmark(directory: URL, progress: @escaping (String) -> Void) -> [String]
+  /// NPU sweep on a MediaTek phone. `model` is the benchmarked model's ONNX.
+  /// Works in `directory`, says how far it is through `progress`, and
+  /// returns lines for the log. Nothing by default.
+  func afterBenchmark(model: URL?, directory: URL, progress: @escaping (String) -> Void) -> [String]
   /// The same runtime on the CPU, for checking an accelerator's results
   /// against (`EngineHost.compareWithReference`); nil when this already is
   /// the CPU or the backend has none.
@@ -104,7 +105,7 @@ public protocol EngineBackend: AnyObject, Sendable {
 }
 
 extension EngineBackend {
-  public func afterBenchmark(directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
+  public func afterBenchmark(model: URL?, directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
   public func referenceBackend() -> (any EngineBackend)? { nil }
   public func probeAgainstReference(model: URL, directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
 }

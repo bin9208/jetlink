@@ -289,6 +289,10 @@ enum TFLite {
     /// Index into the model's buffers; 0 is the empty buffer every tensor
     /// without constant data points at.
     var buffer: Int = 0
+    /// Symmetric quantization, one scale per slice along
+    /// `quantizedDimension` (zero points 0): an int8 weight's.
+    var scales: [Float]? = nil
+    var quantizedDimension: Int = 0
 
     var elementCount: Int { shape.reduce(1, *) }
   }
@@ -367,11 +371,22 @@ enum TFLite {
       let shape = b.vector(t.shape.map { Int32($0) })
       let signature = b.vector(t.shape.map { Int32($0) })
       let name = b.string(t.name)
+      let quantization = t.scales.map { scales -> FlatBufferBuilder.Offset in
+        let scale = b.vector(scales.map(\.bitPattern))
+        let zeroPoint = b.vector([Int64](repeating: 0, count: scales.count))
+        // QuantizationParameters: min, max, scale, zero_point, details_type, details, quantized_dimension
+        b.startTable(fields: 7)
+        b.add(2, scale)
+        b.add(3, zeroPoint)
+        b.add(6, Int32(t.quantizedDimension))
+        return b.endTable()
+      }
       // shape, type, buffer, name, quantization, is_variable, sparsity, shape_signature, has_rank
       b.startTable(fields: 9)
       b.add(0, shape)
       b.add(2, UInt32(t.buffer))
       b.add(3, name)
+      b.add(4, quantization)
       b.add(7, signature)
       b.add(1, t.type.rawValue)
       b.add(8, true)

@@ -136,7 +136,8 @@ extension EngineHost {
       if !report.cancelled {
         let started = ProcessInfo.processInfo.systemUptime
         let directory = cache.layout.root.appending(path: "npu-sweep", directoryHint: .isDirectory)
-        let lines = backend.afterBenchmark(directory: directory) { [weak self] detail in
+        let model = try? cache.modelPath(l.sha256)
+        let lines = backend.afterBenchmark(model: model, directory: directory) { [weak self] detail in
           self?.emit(
             .benchmark(
               BenchmarkEvent(

@@ -78,6 +78,8 @@ struct LiteRTLowering {
   var counts: [String: Int] = [:]
   /// uint8 graph inputs become FLOAT32 ones (LiteRTPreparation.prepare).
   var forNPU = false
+  /// The NPU's MatMul weights int8, per output channel, behind a DEQUANTIZE.
+  var int8Weights = false
 
   private init(_ src: Source, opset: Int64, recorded: [String: [Int64]]) {
     self.src = src
@@ -86,9 +88,10 @@ struct LiteRTLowering {
   }
 
   /// Lowers `g`: its inputs, every node in order, its outputs.
-  static func lower(_ g: Graph, opset: Int64, _ src: Source, forNPU: Bool = false) throws -> LiteRTLowering {
+  static func lower(_ g: Graph, opset: Int64, _ src: Source, forNPU: Bool = false, int8Weights: Bool = false) throws -> LiteRTLowering {
     var l = LiteRTLowering(src, opset: opset, recorded: Patches.staticDims(g))
     l.forNPU = forNPU
+    l.int8Weights = int8Weights
     l.nodes = g.nodes
     for (k, n) in g.nodes.enumerated() {
       for name in n.inputs where !name.isEmpty {

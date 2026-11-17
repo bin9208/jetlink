@@ -81,6 +81,8 @@ struct TFLiteFile {
     let signature: [Int]
     let type: Int8
     let buffer: Int
+    /// QuantizationParameters.scale; empty when the tensor has none.
+    var scales: [Float] = []
   }
 
   struct Operator {
@@ -127,7 +129,7 @@ struct TFLiteFile {
     tensors = subgraph.tables(0).map { t in
       Tensor(
         name: t.string(3) ?? "", shape: t.int32s(0).map { Int($0) }, signature: t.int32s(7).map { Int($0) }, type: t.i8(1),
-        buffer: Int(t.u32(2)))
+        buffer: Int(t.u32(2)), scales: t.table(4)?.int32s(2).map { Float(bitPattern: UInt32(bitPattern: $0)) } ?? [])
     }
     inputs = subgraph.int32s(1).map { Int($0) }
     outputs = subgraph.int32s(2).map { Int($0) }
@@ -201,6 +203,11 @@ struct TFLiteInterpreter {
     case TFLite.TensorType.float32.rawValue: return try Elements.floats(b, as: DataType.float, for: file.tensors[t].name)
     case TFLite.TensorType.float16.rawValue: return try Elements.floats(b, as: DataType.float16, for: file.tensors[t].name)
     case TFLite.TensorType.int32.rawValue: return try Elements.integers(b, as: DataType.int32, for: file.tensors[t].name).map { Float($0) }
+    case TFLite.TensorType.int8.rawValue:
+      // symmetric, one scale per slice along dimension 0 (or one for all)
+      let scales = file.tensors[t].scales
+      let per = max(b.count / max(scales.count, 1), 1)
+      return b.enumerated().map { i, byte in Float(Int8(bitPattern: byte)) * (scales.isEmpty ? 1 : scales[min(i / per, scales.count - 1)]) }
     default: return b.map { Float($0) }
     }
   }

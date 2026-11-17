@@ -1002,13 +1002,44 @@ extension LiteRTLowering {
   /// APU took none of its 2483 ops. FULLY_CONNECTED is what an NPU runs a
   /// linear layer as anyway. False, with nothing emitted, for a weight of
   /// another element type or with a real batch.
+  /// A [rows, cols] weight transposed to FULLY_CONNECTED's [cols, rows] and
+  /// stored int8 with one symmetric scale, behind a DEQUANTIZE to FLOAT32:
+  /// weight-only quantization, half an fp16 weight's bytes for an NPU that
+  /// keeps it int8.
+  private mutating func int8Weight(_ w: Constant, rows: Int, cols: Int, _ name: String) throws -> Int {
+    let values = try floats(w)
+    var bytes = [UInt8](repeating: 0, count: rows * cols)
+    // One scale for the whole weight: MediaTek's MDLA refuses a DEQUANTIZE
+    // with one per channel ("Per-channel quantization is unsupported").
+    let peak = values.reduce(Float(0)) { max($0, abs($1)) }
+    let scale = peak > 0 ? peak / 127 : 1
+    let scales = [scale]
+    for c in 0..<cols {
+      for r in 0..<rows {
+        let q = min(max((values[r * cols + c] / scale).rounded(), -127), 127)
+        bytes[c * rows + r] = UInt8(bitPattern: Int8(q))
+      }
+    }
+    let q = addTensor(name, [cols, rows], .int8, buffer: buffer(bytes))
+    model.tensors[q].scales = scales
+    model.tensors[q].quantizedDimension = 0
+    let dequantized = addTensor("\(name)__f32", [cols, rows], .float32)
+    // with the fp16 weights' DEQUANTIZEs, ahead of every other op
+    prologue.append(TFLite.Operator(op: .dequantize, inputs: [q], outputs: [dequantized]))
+    count("int8 weights")
+    return dequantized
+  }
+
   private mutating func matmulAsFullyConnected(_ n: Node, _ a: Value, _ w: Constant, _ out: [Int]) throws -> Bool {
     guard w.type == DataType.float || w.type == DataType.float16, w.dims.dropLast(2).allSatisfy({ $0 == 1 }) else { return false }
     let name = n.outputs[0]
     let (k, units) = (w.dims[w.dims.count - 2], w.dims[w.dims.count - 1])
     var weight2D = w
     weight2D.dims = [k, units]
-    let weight = try transposedWeight(weight2D, rows: k, cols: units, "\(w.name)__t")
+    let weight =
+      int8Weights
+      ? try int8Weight(weight2D, rows: k, cols: units, "\(w.name)__q")
+      : try transposedWeight(weight2D, rows: k, cols: units, "\(w.name)__t")
     let x = try tensor(a)
     let shape = model.tensors[x].shape
     let rows = shape.dropLast().reduce(1, *)

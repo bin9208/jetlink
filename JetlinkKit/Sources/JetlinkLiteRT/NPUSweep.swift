@@ -1,44 +1,50 @@
 import Foundation
 import JetlinkONNX
+import JetlinkRegistry
 import JetlinkServer
 
-/// After a benchmark on a MediaTek APU, Light Speed 2's kinds of layers one
-/// kind at a time, on the APU and on the GPU, for finding what makes it slow
-/// there: compiled whole for the Galaxy Tab S10+'s MDLA (every layer on it,
-/// NeuroPilot's plan said), it took 2051 ms a run, where linear layers of
-/// its weights' size took about 80 (carrot.12's sweep: 6.0 ms for 64 MB,
-/// 26.5 for 256, about 10 GB/s; the GPU 6.6 and 19.4).
+/// After a benchmark on a MediaTek APU, what tells why the driving model is
+/// slow there, and whether int8 weights make it fast.
 ///
-/// Each case is eight of one kind at Light Speed 2's shapes
-/// (SyntheticModels.Block), or 64 MB of 2048-wide linear layers over 128
-/// rows for scale, converted for the device that runs it and compiled, then
-/// run ten times on zeros. The kind whose APU time is far above its GPU time
-/// is what to change.
+/// What earlier sweeps found on the Galaxy Tab S10+ (MT6989): Light Speed 2
+/// compiled whole for the MDLA runs 2051 ms a frame, all of it the model
+/// (copies under a millisecond). 2048-wide linear layers ran 1.3, 6.0 and
+/// 26.5 ms for 16, 64 and 256 MB of fp16 weights (about 10 GB/s, the GPU
+/// about the same), and eight of each of Light Speed 2's other kinds of
+/// layers at its shapes ran 0.3 to 2.3 ms on the APU, no slower than on the
+/// GPU. None of that adds up to 2 s; Light Speed 2's 770 MB, three times the
+/// largest case, and its 11-minute compile (a second for 256 MB) do.
+///
+/// So this sweep finds the size where fp16 linear layers stop scaling (64 to
+/// 768 MB), times int8 weights (half the bytes, one scale a weight: the
+/// MDLA takes no per-channel DEQUANTIZE), and compiles and times the model
+/// itself with int8 weights (416 MB for Light Speed 2).
 extension LiteRtBackend {
   struct SweepCase {
     enum Kind {
       case linear(layers: Int)
-      case block(SyntheticModels.Block)
+      case model(URL)
     }
 
     let kind: Kind
     let npu: Bool
+    let int8: Bool
 
     var name: String {
-      let what: String
+      let weights = int8 ? "int8" : "fp16"
       switch kind {
       case .linear(let layers):
-        what = "linear \((layers * LiteRtBackend.sweepWidth * LiteRtBackend.sweepWidth * 2) >> 20) MB (\(layers) x \(LiteRtBackend.sweepWidth))"
-      case .block(let block):
-        what = "\(LiteRtBackend.sweepRepeats) x \(block.rawValue)"
+        let mb = (layers * LiteRtBackend.sweepWidth * LiteRtBackend.sweepWidth * (int8 ? 1 : 2)) >> 20
+        return "\(npu ? "NPU" : "GPU") linear \(weights) \(mb) MB (\(layers) x \(LiteRtBackend.sweepWidth))"
+      case .model(let url):
+        return "\(npu ? "NPU" : "GPU") \(url.deletingPathExtension().lastPathComponent.prefix(16)) \(weights) weights"
       }
-      return "\(npu ? "NPU" : "GPU") \(what)"
     }
 
     var slug: String {
       switch kind {
-      case .linear(let layers): "linear\(layers)-\(npu)"
-      case .block(let block): "\(String(describing: block))-\(npu)"
+      case .linear(let layers): "linear\(layers)-\(npu)-\(int8)"
+      case .model: "model-\(npu)-\(int8)"
       }
     }
   }
@@ -46,18 +52,35 @@ extension LiteRtBackend {
   static let sweepWidth = 2048
   static let sweepRows = 128
   static let sweepRuns = 10
-  static let sweepRepeats = 8
 
-  static let sweepCases: [SweepCase] = [true, false].flatMap { npu in
-    [SweepCase(kind: .linear(layers: 8), npu: npu)] + SyntheticModels.Block.allCases.map { SweepCase(kind: .block($0), npu: npu) }
+  /// Smallest first, the model with int8 weights before the largest fp16
+  /// cases: each line is logged as it finishes, so a case that runs the
+  /// phone out of memory leaves the ones before it.
+  static func sweepCases(model: URL?) -> [SweepCase] {
+    var cases = [
+      SweepCase(kind: .linear(layers: 8), npu: true, int8: false),
+      SweepCase(kind: .linear(layers: 8), npu: true, int8: true),
+      SweepCase(kind: .linear(layers: 48), npu: true, int8: false),
+      SweepCase(kind: .linear(layers: 64), npu: true, int8: false),
+    ]
+    if let model { cases.append(SweepCase(kind: .model(model), npu: true, int8: true)) }
+    cases += [
+      SweepCase(kind: .linear(layers: 80), npu: true, int8: false),
+      SweepCase(kind: .linear(layers: 96), npu: true, int8: false),
+      SweepCase(kind: .linear(layers: 96), npu: true, int8: true),
+      SweepCase(kind: .linear(layers: 96), npu: false, int8: false),
+    ]
+    return cases
   }
 
-  public func afterBenchmark(directory: URL, progress: @escaping (String) -> Void) -> [String] {
+  public func afterBenchmark(model: URL?, directory: URL, progress: @escaping (String) -> Void) -> [String] {
     #if os(Android)
       guard profile == .npu, LiteRtRuntime.npuVendor == .mediaTek else { return [] }
-      var lines = ["NPU sweep: \(Self.sweepCases.count) cases, Light Speed 2's kinds of layers on the APU and the GPU"]
-      for (index, sweep) in Self.sweepCases.enumerated() {
-        progress("NPU sweep \(index + 1)/\(Self.sweepCases.count): \(sweep.name)")
+      let cases = Self.sweepCases(model: model)
+      var lines = ["NPU sweep: \(cases.count) cases: fp16 linear layers by size, int8 weights, the model with int8 weights"]
+      for (index, sweep) in cases.enumerated() {
+        progress("NPU sweep \(index + 1)/\(cases.count): \(sweep.name)")
+        log.info("NPU sweep: starting \(sweep.name)")
         let line = runSweepCase(sweep, in: directory)
         log.info("NPU sweep: \(line)")
         lines.append("NPU sweep: \(line)")
@@ -79,23 +102,23 @@ extension LiteRtBackend {
       try? fm.removeItem(at: work)
       let compiled = work.appending(path: LiteRtArtifact.npuCache, directoryHint: .isDirectory)
       try fm.createDirectory(at: compiled, withIntermediateDirectories: true)
-      let onnx = work.appending(path: "model.onnx")
       let convertStarted = Date()
+      let converted: LiteRTPreparation.Report
       switch sweep.kind {
       case .linear(let layers):
+        let onnx = work.appending(path: "model.onnx")
         try SyntheticModels.writeLinearStack(layers: layers, width: Self.sweepWidth, rows: Self.sweepRows, to: onnx)
-      case .block(let block):
-        try SyntheticModels.writeBlocks(block, repeats: Self.sweepRepeats, to: onnx)
+        converted = try LiteRTPreparation.prepare(source: onnx, into: work, forNPU: sweep.npu, int8Weights: sweep.int8)
+        try? fm.removeItem(at: onnx)
+      case .model(let onnx):
+        converted = try LiteRTPreparation.prepare(source: onnx, into: work, forNPU: sweep.npu, int8Weights: sweep.int8)
       }
-      let converted = try LiteRTPreparation.prepare(source: onnx, into: work, forNPU: sweep.npu)
-      try? fm.removeItem(at: onnx)
       let convertSeconds = Date().timeIntervalSince(convertStarted)
       let compileStarted = Date()
       let options: LiteRtCompileOptions = sweep.npu ? .npu(compiled: compiled, gpu: nil) : .gpu(cache: nil)
       let engine = try LiteRtEngine(model: converted.url, options: options, device: "sweep", label: { $0.name })
       defer { engine.close() }
       let compileSeconds = Date().timeIntervalSince(compileStarted)
-      try engine.run()
       try engine.run()
       var runs: [Double] = []
       var parts: [String: [Double]] = [:]
@@ -109,12 +132,22 @@ extension LiteRtBackend {
           parts[part.name, default: []].append(Double(part.us) / 1000)
         }
       }
+      // whether the outputs came out as numbers, from the last run
+      var finite = true
+      for (name, spec) in engine.outputs where spec.type == .float {
+        if let out = engine.output(name) {
+          let values = UnsafeBufferPointer(start: out.assumingMemoryBound(to: Float.self), count: spec.byteCount / 4)
+          finite = finite && values.allSatisfy(\.isFinite)
+        }
+      }
       func median(_ v: [Double]) -> String { String(format: "%.1f", v.sorted()[v.count / 2]) }
       let phases = order.map { "\($0) \(median(parts[$0]!))" }.joined(separator: ", ")
+      let bytes = Files.size(of: converted.url) >> 20
       return "\(sweep.name) on \(engine.hardware.name)\(engine.fullyAccelerated ? "" : " (not every op)"): "
-        + "\(converted.operators.values.reduce(0, +)) ops, convert \(String(format: "%.0f", convertSeconds)) s, compile \(String(format: "%.0f", compileSeconds)) s, "
+        + "\(converted.operators.values.reduce(0, +)) ops, \(bytes) MB file, convert \(String(format: "%.0f", convertSeconds)) s, "
+        + "compile \(String(format: "%.0f", compileSeconds)) s, "
         + "\(runs.count) runs ms median \(median(runs)) min \(String(format: "%.1f", runs.min()!)) max \(String(format: "%.1f", runs.max()!))"
-        + (phases.isEmpty ? "" : " (\(phases))")
+        + (phases.isEmpty ? "" : " (\(phases))") + (finite ? "" : ", outputs NOT finite")
     } catch {
       return "\(sweep.name): failed: \(error)"
     }

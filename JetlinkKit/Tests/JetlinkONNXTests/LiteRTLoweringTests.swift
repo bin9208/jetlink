@@ -401,6 +401,19 @@ import Testing
     #expect(maxError(out["qk"]!, qk) < 1e-5)
     #expect(maxError(gpuOut["xw"]!, xw) < 1e-5)
     #expect(maxError(gpuOut["qk"]!, qk) < 1e-5)
+
+    // int8 weights: the FULLY_CONNECTED reads a DEQUANTIZE of an int8 [N, K]
+    // with one scale (MDLA takes no per-channel DEQUANTIZE); within the rounding of 127 steps.
+    let (int8, report) = try g.convert(forNPU: true, int8Weights: true)
+    let qfc = try #require(int8.operators.first { $0.op == "FULLY_CONNECTED" })
+    let deq = try #require(int8.operators.first { $0.outputs == [qfc.inputs[1]] })
+    let weight = int8.tensors[deq.inputs[0]]
+    #expect(deq.op == "DEQUANTIZE" && weight.type == TFLite.TensorType.int8.rawValue && weight.shape == [4, 5] && weight.scales.count == 1)
+    #expect(report.lowerings["int8 weights"] == 1)
+    let qOut = try Self.run(int8, ["x": x, "q": q, "k": k])
+    let bound = 5 * (w.map(abs).max()! / 127) * x.map(abs).max()!
+    #expect(maxError(qOut["xw"]!, xw) < bound)
+    #expect(maxError(qOut["qk"]!, qk) < 1e-5)
   }
 
   // MARK: reductions and Softmax

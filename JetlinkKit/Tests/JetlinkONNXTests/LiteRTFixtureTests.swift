@@ -169,6 +169,7 @@ import Testing
       let big = dir.url.appendingPathComponent("big.onnx")
       try SyntheticModels.writeLinearStack(layers: 8, width: 2048, rows: 128, to: big)
       _ = try LiteRTPreparation.prepare(source: big, into: URL(fileURLWithPath: out, isDirectory: true), forNPU: true)
+      _ = try LiteRTPreparation.prepare(source: big, into: URL(fileURLWithPath: out).appendingPathComponent("int8"), forNPU: true, int8Weights: true)
     }
   }
 
@@ -214,7 +215,9 @@ import Testing
     // NPU there, for compiling it ahead of time on the PC
     // (android/scripts/mediatek-compile-check.sh).
     if let out = environment["JETLINK_LITERT_OUT"], !out.isEmpty {
-      _ = try LiteRTPreparation.prepare(source: model, into: URL(fileURLWithPath: out, isDirectory: true), forNPU: true)
+      // JETLINK_LITERT_INT8=1: with int8 weights
+      let int8 = environment["JETLINK_LITERT_INT8"] == "1"
+      _ = try LiteRTPreparation.prepare(source: model, into: URL(fileURLWithPath: out, isDirectory: true), forNPU: true, int8Weights: int8)
     }
     // The GPU's conversion converts too; the checks are the NPU's.
     print("converted for the GPU: \(try Self.convert(model).report.summary)")
