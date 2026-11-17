@@ -4,6 +4,14 @@ import JetlinkServer
 /// One session of a chain: its model file, the execution provider to run it
 /// on, and that provider's options.
 public struct SessionPlan: Sendable, Equatable {
+  /// The same plan with one more provider option.
+  func with(option key: String, _ value: String) -> SessionPlan {
+    var options = self.options
+    options[key] = value
+    return SessionPlan(
+      model: model, provider: provider, options: options, threads: threads, label: label, usesGPU: usesGPU, usesNeuralEngine: usesNeuralEngine)
+  }
+
   public let model: URL
   /// onnxruntime's name for the provider, "CoreML" or "QNN"; nil for the CPU
   /// provider alone.

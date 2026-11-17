@@ -201,9 +201,7 @@ public final class OrtBackend: EngineBackend {
         "htp_graph_finalization_optimization_mode": "3",
         "enable_htp_fp16_precision": "1",
         "qnn_context_priority": "high",
-        // buffers in the NPU's own memory (OrtEngine sharedMemory), and
         // FastRPC woken for the next call within 100 us
-        "enable_htp_shared_memory_allocator": "1",
         "rpc_control_latency": "100",
       ]
     case .qnnGPU: ["backend_type": "gpu"]
@@ -352,6 +350,26 @@ public final class OrtBackend: EngineBackend {
     return meta
   }
 
+  /// QNN's HTP shared memory needs FastRPC's remote_register_buf_attr2,
+  /// which some phones' vendor libcdsprpc lacks (a Galaxy Tab S9 on Android
+  /// 16): onnxruntime then cannot make the session at all. So the option is
+  /// never compiled in, only asked for at load.
+  static let sharedMemoryOption = "enable_htp_shared_memory_allocator"
+
+  /// The engine with its buffers in the NPU's shared memory where the phone
+  /// can, else as before.
+  private func loadEngine(_ plans: [SessionPlan]) throws -> OrtEngine {
+    if profile == .htpWhole {
+      do {
+        let shared = plans.map { $0.with(option: OrtBackend.sharedMemoryOption, "1") }
+        return try OrtEngine(plans: shared, device: deviceTag(), keepAlive: keepAlive, keepCPUWarm: keepCPUWarm, sharedMemory: true)
+      } catch {
+        log.warning("NPU shared memory unavailable, buffers on the heap: \(error)")
+      }
+    }
+    return try OrtEngine(plans: plans, device: deviceTag(), keepAlive: keepAlive, keepCPUWarm: keepCPUWarm)
+  }
+
   // MARK: variants
 
   /// The loaded model's artifact under each way of running it this build
@@ -373,7 +391,7 @@ public final class OrtBackend: EngineBackend {
         let plans = self.plans(artifact, manifest).map { plan -> SessionPlan in
           var options = plan.options
           if !v.rpc { options["rpc_control_latency"] = nil }
-          if !v.shared { options["enable_htp_shared_memory_allocator"] = nil }
+          if v.shared { options[OrtBackend.sharedMemoryOption] = "1" }
           return SessionPlan(
             model: plan.model, provider: plan.provider, options: options, threads: plan.threads, label: plan.label, usesGPU: plan.usesGPU,
             usesNeuralEngine: plan.usesNeuralEngine)
@@ -390,7 +408,8 @@ public final class OrtBackend: EngineBackend {
         let label = v.shared && !engine.usesSharedMemory ? "\(v.name) (shared memory unavailable)" : v.name
         results.append(String(format: "%@ p50 %.2f p90 %.2f ms", label, ms[ms.count / 2], ms[ms.count * 9 / 10]))
       } catch {
-        results.append("\(v.name) failed: \(error)")
+        let reason = "\(error)".contains("remote_register_buf_attr2") ? "this phone's FastRPC cannot" : "\(error)".prefix(160).description
+        results.append("\(v.name) unavailable (\(reason))")
       }
     }
     return ["variants (the loaded model, 60 runs each): " + results.joined(separator: "; ")]
@@ -411,9 +430,7 @@ public final class OrtBackend: EngineBackend {
     }
     let what = profile.usesCoreML ? "the CoreML model" : "the model"
     let (engine, seconds) = try Artifact.load(artifact, meta: meta, what: what, report: report) {
-      try OrtEngine(
-        plans: plans(artifact, manifest), device: deviceTag(), keepAlive: keepAlive, keepCPUWarm: keepCPUWarm,
-        sharedMemory: profile == .htpWhole)
+      try loadEngine(plans(artifact, manifest))
     }
     log.info("onnxruntime sessions on \(profile.rawValue) in \(String(format: "%.1f", seconds)) s: \(engine.providers.joined(separator: " then "))")
     return engine
