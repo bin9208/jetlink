@@ -74,9 +74,10 @@ public enum LiteRTPreparation {
   ///   over more than 512 channels is split, and Expand's ones have the
   ///   output's shape: what NeuroPilot refused otherwise.
   /// The GPU keeps the lowering it was fastest with.
-  /// `int8Weights` (with `forNPU`) stores the MatMuls' weights int8, one
-  /// scale per output channel, behind a DEQUANTIZE: half the bytes an NPU
-  /// streams each run.
+  /// `int8Weights` stores the MatMuls by a constant as FULLY_CONNECTEDs with
+  /// int8 weights, one scale each (MediaTek's MDLA refuses per-channel ones),
+  /// behind a DEQUANTIZE: half the bytes, for an accelerator that keeps them
+  /// int8. On the MDLA they ran slower than fp16.
   /// `keepFraction` (a diagnostic) keeps the first part of the converted
   /// graph's operators, the weights' DEQUANTIZEs aside, with every tensor
   /// the part makes that the rest reads as an output: for timing a model a

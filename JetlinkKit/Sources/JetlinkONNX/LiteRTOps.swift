@@ -1023,10 +1023,12 @@ extension LiteRTLowering {
     guard da[da.count - 1] == db[db.count - 2] else { throw OnnxError("MatMul of \(da) and \(db)") }
     let batch = try Self.broadcast(Array(da.dropLast(2)), Array(db.dropLast(2)))
     let out = batch + [da[da.count - 2], db[db.count - 1]]
-    // For the NPU only: the GPU ran Light Speed 2's BATCH_MATMULs by a
-    // constant [K, N] in carrot.7's ~55 ms, and slower once they were
-    // FULLY_CONNECTEDs (70-110 ms on a Dimensity 9300, with the splits below).
-    if forNPU, case .constant(let w) = b, try matmulAsFullyConnected(n, a, w, out) {
+    // For the NPU: the GPU keeps carrot.7's BATCH_MATMULs by a constant
+    // [K, N] (Light Speed 2 ran 94 ms on a Dimensity 9300's GPU so, as with
+    // the NPU's rewrites). int8 weights take the FULLY_CONNECTED form on the
+    // GPU too: its int8
+    // weights behind a DEQUANTIZE, half the bytes if the GPU keeps them so.
+    if forNPU || int8Weights, case .constant(let w) = b, try matmulAsFullyConnected(n, a, w, out) {
       return
     }
     // A constant right-hand side stays [K, N] for the GPU.

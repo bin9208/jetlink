@@ -78,7 +78,7 @@ struct LiteRTLowering {
   var counts: [String: Int] = [:]
   /// uint8 graph inputs become FLOAT32 ones (LiteRTPreparation.prepare).
   var forNPU = false
-  /// The NPU's MatMul weights int8, per output channel, behind a DEQUANTIZE.
+  /// MatMul weights int8, one scale each, behind a DEQUANTIZE (as FULLY_CONNECTEDs, on the NPU and the GPU alike).
   var int8Weights = false
 
   private init(_ src: Source, opset: Int64, recorded: [String: [Int64]]) {
