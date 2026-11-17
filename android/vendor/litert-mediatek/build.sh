@@ -14,6 +14,9 @@ if [ ! -x $B/tools/bazel ]; then
 fi
 export PATH=$B/tools:$PATH
 cd $B/LiteRT
+# Jetlink Carrot's change to the dispatch library: NeuroPilot's deadline and
+# cache flush hint from the environment (dispatch-tuning.patch, beside this).
+git apply --check "$(dirname "$0")/dispatch-tuning.patch" 2>/dev/null && git apply "$(dirname "$0")/dispatch-tuning.patch"
 export ANDROID_NDK_HOME=$SDK/ndk/28.1.13356709 ANDROID_NDK_API_LEVEL=28 ANDROID_NDK_VERSION=28
 export ANDROID_SDK_HOME=$SDK ANDROID_API_LEVEL=34 ANDROID_SDK_API_LEVEL=34 ANDROID_BUILD_TOOLS_VERSION=34.0.0
 export PYTHON_BIN_PATH=/usr/bin/python3 PYTHON_LIB_PATH=/usr/lib/python3/dist-packages

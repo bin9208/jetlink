@@ -87,6 +87,12 @@ import Testing
     #expect(npu.inputs.map { npu.tensors[$0].type } == [TFLite.TensorType.float16.rawValue, TFLite.TensorType.float32.rawValue])
     #expect(npu.count("CAST") == 2 && report.lowerings["uint8 inputs as FLOAT32"] == 1)
     #expect(try Self.run(npu, ["h": [-2, 0.5, 1, 3], "img": [0, 1, 2, 255]])["o"]! == [0, 1.5, 3, 258])
+
+    // or FLOAT16 ones, half the bytes, behind a CAST: 0...255 are exact
+    let (half, halfReport) = try g.convert(forNPU: true, imagesFloat16: true)
+    #expect(half.inputs.map { half.tensors[$0].type } == [TFLite.TensorType.float16.rawValue, TFLite.TensorType.float16.rawValue])
+    #expect(halfReport.lowerings["uint8 inputs as FLOAT16"] == 1)
+    #expect(try Self.run(half, ["h": [-2, 0.5, 1, 3], "img": [0, 1, 2, 255]])["o"]! == [0, 1.5, 3, 258])
   }
 
   /// Light Speed 2's image queue in small: a rank-5 queue sliced along its
@@ -447,6 +453,17 @@ import Testing
     let bound = 5 * (w.map(abs).max()! / 127) * x.map(abs).max()!
     #expect(maxError(qOut["xw"]!, xw) < bound)
     #expect(maxError(qOut["qk"]!, qk) < 1e-5)
+
+    // fully int8, for timing: QUANTIZE, an int8 FULLY_CONNECTED (version 4)
+    // with an int8 weight of one scale per output channel, DEQUANTIZE;
+    // within the rounding of its fixed scales
+    let (full, fullReport) = try g.convert(forNPU: true, fullyInt8: true)
+    let ffc = try #require(full.operators.first { $0.op == "FULLY_CONNECTED" })
+    #expect(full.tensors[ffc.inputs[0]].type == TFLite.TensorType.int8.rawValue && full.tensors[ffc.outputs[0]].type == TFLite.TensorType.int8.rawValue)
+    #expect(full.tensors[ffc.inputs[1]].scales.count == 4 && ffc.version == 4 && full.count("QUANTIZE") == 1)
+    #expect(fullReport.lowerings["fully int8 FULLY_CONNECTEDs"] == 1)
+    let fOut = try Self.run(full, ["x": x, "q": q, "k": k])
+    #expect(maxError(fOut["xw"]!, xw) < 0.25)
   }
 
   // MARK: reductions and Softmax

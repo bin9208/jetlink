@@ -77,6 +77,7 @@ enum TFLite {
     case reduceMin = 89
     case logicalNot = 87
     case abs = 101
+    case quantize = 114
     case selectV2 = 123
     case batchMatmul = 126
     case gelu = 150
@@ -117,6 +118,7 @@ enum TFLite {
       case .reduceMin: "REDUCE_MIN"
       case .logicalNot: "LOGICAL_NOT"
       case .abs: "ABS"
+      case .quantize: "QUANTIZE"
       case .selectV2: "SELECT_V2"
       case .batchMatmul: "BATCH_MATMUL"
       case .gelu: "GELU"
@@ -161,6 +163,7 @@ enum TFLite {
     case exp
     case neg
     case logicalNot
+    case quantize
 
     /// The BuiltinOptions union's type: the member's position, from 1.
     var type: UInt8 {
@@ -190,6 +193,7 @@ enum TFLite {
       case .pow: 56
       case .logicalNot: 63
       case .abs: 78
+      case .quantize: 89
       case .selectV2: 98
       case .batchMatmul: 101
       case .gelu: 116
@@ -275,7 +279,7 @@ enum TFLite {
         b.startTable(fields: 2)
         return b.endTable()
       case .mul, .div, .pad, .transpose, .dequantize, .maximumMinimum, .slice, .abs, .selectV2, .pow, .exp, .neg,
-        .logicalNot:
+        .logicalNot, .quantize:
         b.startTable(fields: 0)
         return b.endTable()
       }
@@ -423,13 +427,25 @@ enum TFLite {
       return b.endTable()
     }()
 
+    // An int8 FULLY_CONNECTED (int8 in, int8 weight, int8 out) is version 4,
+    // a QUANTIZE to int8 version 2 (op_version.cc).
+    let int8FullyConnected = model.operators.contains { o in
+      o.op == .fullyConnected && model.tensors[o.inputs[0]].type == .int8
+    }
+    func version(_ op: TFLite.Op) -> Int32 {
+      switch op {
+      case .fullyConnected where int8FullyConnected: 4
+      case .quantize: 2
+      default: op.version
+      }
+    }
     let codeTables = codes.map { op -> FlatBufferBuilder.Offset in
       // deprecated_builtin_code, custom_code, version, builtin_code. The deprecated
       // byte field holds codes below 127 and 127
       // (PLACEHOLDER_FOR_GREATER_OP_CODES) for the rest.
       b.startTable(fields: 4)
       b.add(3, op.rawValue, force: true)
-      b.add(2, op.version, default: 1)
+      b.add(2, version(op), default: 1)
       b.add(0, Int8(min(op.rawValue, 127)), force: true)
       return b.endTable()
     }

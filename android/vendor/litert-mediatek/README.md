@@ -23,4 +23,10 @@ At run time both reach the APU through the phone's NeuroPilot adapter
 Whether a phone's vendor partition offers it to apps is the phone maker's
 choice; where it does not, the NPU profile says so and the GPU runs the model.
 
+The dispatch library carries one change of Jetlink Carrot's,
+`dispatch-tuning.patch`: when `JETLINK_NEURON_DEADLINE` (ms) or
+`JETLINK_NEURON_CACHE_FLUSH` (NeuroPilot's flush hint bits) is set, each
+execution gets `NeuronExecution_setDeadline` or `setCacheFlushHint`, for the
+NPU sweep to time what they do. Unset, it behaves as LiteRT's.
+
 `SHA256SUMS` pins the copies here; `app/build.gradle.kts` checks them.

@@ -85,22 +85,25 @@ public enum LiteRTPreparation {
   /// instead.
   public static func prepare(
     source: URL, into directory: URL, forNPU: Bool = false, int8Weights: Bool = false, keepFraction: Double? = nil,
-    keepOperators: Int? = nil
+    keepOperators: Int? = nil, imagesFloat16: Bool = false, fullyInt8: Bool = false
   ) throws -> Report {
     let data = try Data(contentsOf: source, options: .alwaysMapped)
     return try data.withUnsafeBytes { buf in
-      try prepare(Source(bytes: buf), into: directory, forNPU: forNPU, int8Weights: int8Weights, keepFraction: keepFraction, keepOperators: keepOperators)
+      try prepare(Source(bytes: buf), into: directory, forNPU: forNPU, int8Weights: int8Weights, keepFraction: keepFraction, keepOperators: keepOperators,
+        imagesFloat16: imagesFloat16, fullyInt8: fullyInt8)
     }
   }
 
-  private static func prepare(_ src: Source, into directory: URL, forNPU: Bool, int8Weights: Bool, keepFraction: Double?, keepOperators: Int?) throws -> Report {
+  private static func prepare(_ src: Source, into directory: URL, forNPU: Bool, int8Weights: Bool, keepFraction: Double?, keepOperators: Int?, imagesFloat16: Bool, fullyInt8: Bool
+  ) throws -> Report {
     var (model, g) = try Decode.preparable(src)
     let stripped = try Patches.stripTinygradOps(&g, &model.opsets)
     guard let opset = model.opsets.first(where: { $0.domain.isEmpty || $0.domain == "ai.onnx" })?.version else {
       throw OnnxError("the model imports no default-domain opset")
     }
 
-    var lowered = try LiteRTLowering.lower(g, opset: opset, src, forNPU: forNPU, int8Weights: int8Weights)
+    var lowered = try LiteRTLowering.lower(
+      g, opset: opset, src, forNPU: forNPU, int8Weights: int8Weights, imagesFloat16: imagesFloat16, fullyInt8: fullyInt8)
     var removed = 0
     var fused = 0
     var moved = 0

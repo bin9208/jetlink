@@ -3,87 +3,96 @@ import JetlinkONNX
 import JetlinkRegistry
 import JetlinkServer
 
-/// After a benchmark on a MediaTek phone, what decides how to run the model
-/// within the comma's 50 ms there.
+/// After a benchmark on a MediaTek phone, the last of the NPU sweeps: what
+/// is left to make Light Speed 2 fast on a Dimensity's APU.
 ///
-/// On the Galaxy Tab S10+ (MT6989) carrot.18 brought Light Speed 2 on the
-/// APU to 157 ms (the image queue's views kept small), 126 of them its
-/// body's 718 MB of weights: about 6 GB/s, where a Snapdragon 8 Elite's NPU
-/// streams N16's 814 MB in 25 ms. (The linear layers of earlier sweeps
-/// looked faster because their repeating weights compressed eightfold on
-/// the APU.) LiteRT compiles for the APU with no options of NeuroPilot's,
-/// whose compiler knows --num-mdla (the cores to spread over), --opt and
-/// --fc-to-conv, and reads them from MTKNN_ADAPTER_COMPILER_OPTIONS: on the
-/// PC, --num-mdla=2 changed the compiled model and a made-up option did not.
+/// Where it stands on the Galaxy Tab S10+ (MT6989): 120 to 165 ms a frame on
+/// the APU (carrot.18's small image-queue views), 94 to 120 on the GPU.
+/// NeuroPilot's compile options (--num-mdla=2, --opt=3, --fc-to-conv) all
+/// reached the phone's compiler and none helped; turbo boost with the L1
+/// cache and the low-latency hint, and MTKNN_MDLA_ENABLE_MULTI_CORE=1,
+/// killed the app; the GPU took no DEQUANTIZEd int8 weight.
 ///
-/// So this sweep compiles the benchmarked model for the APU under each of
-/// those, and times it; and, on the GPU, times it with fp16 and with int8
-/// weights (half the bytes, if LiteRT's GPU keeps them int8) and says how
-/// far the int8 one's outputs are. Each NPU line says how big the compiled
-/// model came out, which tells whether the options reached the compiler.
+/// So this sweep times the model on the APU by default; with a real-time
+/// deadline of 50 ms (the scheduler is told it is one), with the CPU cache
+/// flush around its inputs and outputs off, and with NeuroPilot's
+/// import_forever (the buffers registered once), each through our dispatch
+/// library's JETLINK_NEURON_* variables or the compiler's options; with its
+/// FULLY_CONNECTEDs fully int8 (the MDLA's own kind of layer, at fixed
+/// scales, so for timing alone); and with all of them.
+///
+/// A case that kills the app is marked beside the sweep's directory before
+/// it starts: the next sweep says which one it was and leaves it out.
 extension LiteRtBackend {
   struct SweepCase {
     let name: String
-    let npu: Bool
-    let int8: Bool
-    /// MTKNN_ADAPTER_COMPILER_OPTIONS for the NPU's compile
     var options: String? = nil
-    /// MTKNN_MDLA_ENABLE_MULTI_CORE=1 for the compile and the runs
-    var multiCore = false
-    var tuned = false
+    var deadline: Int? = nil
+    var cacheFlush: Int? = nil
+    var fullyInt8 = false
   }
 
   static let sweepRuns = 5
+  static let importForever = #"--apusys-config "{ \"import_forever\": true }""#
 
-  /// The GPU's first: carrot.20's sweep never reached them. Its options
-  /// for the APU (--num-mdla=2, --opt=3, --fc-to-conv, all three) all
-  /// reached the compiler (each compiled to another size) and none made
-  /// the model faster (115 to 155 ms against the default's 120 to 156);
-  /// turbo boost with the L1 cache and the low-latency hint killed the app
-  /// in the compile, three times, so it is gone.
   static let sweepCases: [SweepCase] = [
-    SweepCase(name: "GPU fp16", npu: false, int8: false),
-    SweepCase(name: "GPU int8", npu: false, int8: true),
-    SweepCase(name: "NPU default", npu: true, int8: false),
-    SweepCase(name: "NPU multi-core", npu: true, int8: false, multiCore: true),
-    SweepCase(name: "NPU --num-mdla=2, multi-core", npu: true, int8: false, options: "--num-mdla=2", multiCore: true),
+    SweepCase(name: "NPU default"),
+    SweepCase(name: "NPU deadline 50 ms", deadline: 50),
+    // NEURON_CACHE_FLUSH_DISABLE_SYNC_INPUT | ..._DISABLE_INVALIDATE_OUTPUT
+    SweepCase(name: "NPU cache flush off", cacheFlush: 3),
+    SweepCase(name: "NPU import_forever", options: importForever),
+    SweepCase(name: "NPU FULLY_CONNECTEDs fully int8", fullyInt8: true),
+    SweepCase(name: "NPU all of them", options: importForever, deadline: 50, cacheFlush: 3, fullyInt8: true),
   ]
 
   public func afterBenchmark(model: URL?, directory: URL, progress: @escaping (String) -> Void) -> [String] {
     #if os(Android)
       guard LiteRtRuntime.npuVendor == .mediaTek, let model else { return [] }
+      let fm = FileManager.default
+      let running = directory.deletingLastPathComponent().appending(path: "npu-sweep-running")
+      let killers = directory.deletingLastPathComponent().appending(path: "npu-sweep-killed")
+      var killed = Set((try? String(contentsOf: killers, encoding: .utf8))?.split(separator: "\n").map(String.init) ?? [])
       let cases = Self.sweepCases
-      var lines = ["NPU sweep: \(model.lastPathComponent) under \(cases.count) settings: NeuroPilot's options on the APU, int8 weights on the GPU"]
-      var gpuReference: [Float]?
+      var lines = ["NPU sweep: \(model.lastPathComponent) under \(cases.count) settings on the APU"]
+      if let last = try? String(contentsOf: running, encoding: .utf8), !last.isEmpty {
+        let line = "NPU sweep: the last sweep ended with the app killed during \(last); it is left out from now on"
+        log.warning(line)
+        lines.append(line)
+        killed.insert(last)
+        try? killed.sorted().joined(separator: "\n").write(to: killers, atomically: true, encoding: .utf8)
+        try? fm.removeItem(at: running)
+      }
       for (index, sweep) in cases.enumerated() {
-        progress("NPU sweep \(index + 1)/\(cases.count): \(sweep.name)")
-        log.info("NPU sweep: starting \(sweep.name)")
-        var line: String
-        switch runSweepCase(sweep, model: model, in: directory) {
-        case .success(let result):
-          line = "\(sweep.name): \(result.line)"
-          if !sweep.npu {
-            if let reference = gpuReference, let out = result.output, out.count == reference.count {
-              // the int8 model's driving output against the fp16 one's, on the same zeros
-              let diffs = zip(out, reference).map { abs($0 - $1) }
-              line += String(
-                format: "; against fp16: max |d| %.4f, mean |d| %.5f (fp16 outputs up to %.3f)", diffs.max() ?? 0,
-                diffs.reduce(0, +) / Float(max(diffs.count, 1)), reference.map(abs).max() ?? 0)
-            } else if !sweep.int8 {
-              gpuReference = result.output
-            }
-          }
-        case .failure(let error):
-          line = "\(sweep.name): failed: \(error)"
+        if killed.contains(sweep.name) {
+          lines.append("NPU sweep: \(sweep.name): left out, it killed the app before")
+          continue
         }
+        progress("NPU sweep \(index + 1)/\(cases.count): \(sweep.name)")
+        log.info("NPU sweep: starting \(sweep.name) (\(Self.availableMemory()) MB available)")
+        try? sweep.name.write(to: running, atomically: true, encoding: .utf8)
+        let line: String
+        switch runSweepCase(sweep, model: model, in: directory) {
+        case .success(let result): line = "\(sweep.name): \(result.line)"
+        case .failure(let error): line = "\(sweep.name): failed: \(error)"
+        }
+        try? fm.removeItem(at: running)
         log.info("NPU sweep: \(line)")
         lines.append("NPU sweep: \(line)")
       }
-      try? FileManager.default.removeItem(at: directory)
+      try? fm.removeItem(at: directory)
       return lines
     #else
       return []
     #endif
+  }
+
+  /// MemAvailable from /proc/meminfo, MB; 0 where it cannot be read.
+  static func availableMemory() -> Int {
+    guard let text = try? String(contentsOfFile: "/proc/meminfo", encoding: .utf8),
+      let line = text.split(separator: "\n").first(where: { $0.hasPrefix("MemAvailable:") }),
+      let kb = line.split(separator: " ").dropFirst().first.flatMap({ Int($0) })
+    else { return 0 }
+    return kb / 1024
   }
 
   struct SweepResult {
@@ -99,7 +108,8 @@ extension LiteRtBackend {
     let work = directory.appending(path: "case", directoryHint: .isDirectory)
     defer { try? fm.removeItem(at: work) }
     let environment = [
-      ("MTKNN_ADAPTER_COMPILER_OPTIONS", sweep.options), ("MTKNN_MDLA_ENABLE_MULTI_CORE", sweep.multiCore ? "1" : nil),
+      ("MTKNN_ADAPTER_COMPILER_OPTIONS", sweep.options), ("JETLINK_NEURON_DEADLINE", sweep.deadline.map(String.init)),
+      ("JETLINK_NEURON_CACHE_FLUSH", sweep.cacheFlush.map(String.init)),
     ]
     for (name, value) in environment {
       if let value { setenv(name, value, 1) } else { unsetenv(name) }
@@ -110,10 +120,10 @@ extension LiteRtBackend {
       let compiled = work.appending(path: LiteRtArtifact.npuCache, directoryHint: .isDirectory)
       try fm.createDirectory(at: compiled, withIntermediateDirectories: true)
       let convertStarted = Date()
-      let converted = try LiteRTPreparation.prepare(source: model, into: work, forNPU: sweep.npu, int8Weights: sweep.int8)
+      let converted = try LiteRTPreparation.prepare(source: model, into: work, forNPU: true, fullyInt8: sweep.fullyInt8)
       let convertSeconds = Date().timeIntervalSince(convertStarted)
       let compileStarted = Date()
-      let options: LiteRtCompileOptions = sweep.npu ? .npu(compiled: compiled, gpu: nil, tuned: sweep.tuned) : .gpu(cache: nil)
+      let options = LiteRtCompileOptions.npu(compiled: compiled, gpu: nil)
       let engine = try LiteRtEngine(model: converted.url, options: options, device: "sweep", label: { $0.name })
       defer { engine.close() }
       let compileSeconds = Date().timeIntervalSince(compileStarted)
@@ -136,7 +146,7 @@ extension LiteRtBackend {
       let finite = output?.allSatisfy(\.isFinite) ?? true
       func median(_ v: [Double]) -> String { String(format: "%.1f", v.sorted()[v.count / 2]) }
       // what LiteRT kept of the NPU's compile: its size changes with the options that reached the compiler
-      let compiledBytes = sweep.npu ? ", compiled \(Files.size(of: compiled)) bytes" : ""
+      let compiledBytes = ", compiled \(Files.size(of: compiled)) bytes"
       let line = "\(Files.size(of: converted.url) >> 20) MB, on \(engine.hardware.name)\(engine.fullyAccelerated ? "" : " (not every op)")"
         + ", convert \(String(format: "%.0f", convertSeconds)) s, compile \(String(format: "%.0f", compileSeconds)) s\(compiledBytes), "
         + "\(runs.count) runs ms median \(median(runs)) min \(String(format: "%.1f", runs.min()!)) max \(String(format: "%.1f", runs.max()!))"

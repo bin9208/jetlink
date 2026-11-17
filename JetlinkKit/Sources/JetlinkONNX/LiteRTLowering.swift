@@ -80,6 +80,12 @@ struct LiteRTLowering {
   var forNPU = false
   /// MatMul weights int8, one scale each, behind a DEQUANTIZE (as FULLY_CONNECTEDs, on the NPU and the GPU alike).
   var int8Weights = false
+  /// With forNPU: the uint8 images FLOAT16 at the graph's edge rather than
+  /// FLOAT32, half the bytes in and out each run.
+  var imagesFloat16 = false
+  /// The NPU's FULLY_CONNECTEDs by a constant fully int8 (QUANTIZE in,
+  /// int8 weights, DEQUANTIZE out) at fixed scales: for timing only.
+  var fullyInt8 = false
 
   private init(_ src: Source, opset: Int64, recorded: [String: [Int64]]) {
     self.src = src
@@ -88,10 +94,13 @@ struct LiteRTLowering {
   }
 
   /// Lowers `g`: its inputs, every node in order, its outputs.
-  static func lower(_ g: Graph, opset: Int64, _ src: Source, forNPU: Bool = false, int8Weights: Bool = false) throws -> LiteRTLowering {
+  static func lower(_ g: Graph, opset: Int64, _ src: Source, forNPU: Bool = false, int8Weights: Bool = false, imagesFloat16: Bool = false, fullyInt8: Bool = false
+  ) throws -> LiteRTLowering {
     var l = LiteRTLowering(src, opset: opset, recorded: Patches.staticDims(g))
     l.forNPU = forNPU
     l.int8Weights = int8Weights
+    l.imagesFloat16 = imagesFloat16
+    l.fullyInt8 = fullyInt8
     l.nodes = g.nodes
     for (k, n) in g.nodes.enumerated() {
       for name in n.inputs where !name.isEmpty {
@@ -131,8 +140,8 @@ struct LiteRTLowering {
     var edge = try Self.edgeType(vi.elemType, vi.key)
     if edge == .uint8 && forNPU {
       // Its values 0...255 as floats, which the graph's Cast then leaves.
-      edge = .float32
-      count("uint8 inputs as FLOAT32")
+      edge = imagesFloat16 ? .float16 : .float32
+      count(imagesFloat16 ? "uint8 inputs as FLOAT16" : "uint8 inputs as FLOAT32")
     }
     let view = Self.edgeView(dims)
     let index = addTensor(vi.key, view, edge)
@@ -156,8 +165,8 @@ struct LiteRTLowering {
     if type == .uint8 && forNPU {
       // A stateful graph's image queue, handed back for the next frame as
       // the input it came from: FLOAT32 too.
-      type = .float32
-      count("uint8 outputs as FLOAT32")
+      type = imagesFloat16 ? .float16 : .float32
+      count(imagesFloat16 ? "uint8 outputs as FLOAT16" : "uint8 outputs as FLOAT32")
     }
     var index = try tensor(name)
     let view = Self.edgeView(model.tensors[index].shape)

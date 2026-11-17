@@ -227,7 +227,13 @@ struct TFLiteInterpreter {
       values[i] = v
     }
     for o in file.operators {
-      values[o.outputs[0]] = try step(o)
+      var out = try step(o)
+      // An int8 tensor holds what its scale can say: rounded, saturated.
+      let t = file.tensors[o.outputs[0]]
+      if t.type == TFLite.TensorType.int8.rawValue, let scale = t.scales.first {
+        out = out.map { min(max(($0 / scale).rounded(), -128), 127) * scale }
+      }
+      values[o.outputs[0]] = out
     }
     var out: [String: [Float]] = [:]
     for i in file.outputs { out[file.tensors[i].name] = try get(i) }
@@ -281,7 +287,7 @@ struct TFLiteInterpreter {
       if file.tensors[o.outputs[0]].type == TFLite.TensorType.float16.rawValue { return x.map { Float(Float16($0)) } }
       if file.tensors[o.outputs[0]].type == TFLite.TensorType.int32.rawValue { return x.map { $0.rounded(.towardZero) } }
       return x
-    case "DEQUANTIZE", "RESHAPE":
+    case "DEQUANTIZE", "RESHAPE", "QUANTIZE":
       return x
     case "TRANSPOSE":
       let perm = try ints(o.inputs[1])

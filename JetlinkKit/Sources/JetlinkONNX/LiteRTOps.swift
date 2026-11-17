@@ -1091,17 +1091,54 @@ extension LiteRTLowering {
     let shape = model.tensors[x].shape
     let rows = shape.dropLast().reduce(1, *)
     let flat = shape.count == 2 ? x : reshaped(x, [rows, k], "\(name)__flat")
-    if out == [rows, units] {
-      let o = try define(name, out, .float32)
-      emit(.fullyConnected, [flat, weight, -1], [o], .fullyConnected(keepNumDims: false))
+    let fc = out == [rows, units] ? try define(name, out, .float32) : addTensor("\(name)__fc", [rows, units], .float32)
+    if fullyInt8 {
+      try int8FullyConnected(flat, weight2D, k: k, units: units, into: fc, name)
     } else {
-      let fc = addTensor("\(name)__fc", [rows, units], .float32)
       emit(.fullyConnected, [flat, weight, -1], [fc], .fullyConnected(keepNumDims: false))
+    }
+    if out != [rows, units] {
       let o = try define(name, out, .float32)
       emit(.reshape, [fc, int32Tensor(out, "\(name)__shape")], [o], .reshape(newShape: out.map { Int32($0) }))
     }
     count("MatMuls by a constant as FULLY_CONNECTED")
     return true
+  }
+
+  /// Scales the fully int8 FULLY_CONNECTEDs assume of what they read and
+  /// write: a LayerNorm's output reaches about 8, a layer's sum about 16.
+  /// Guesses, for timing alone; a model run so computes wrong outputs.
+  static let int8InputRange: Float = 8
+  static let int8OutputRange: Float = 16
+
+  /// `flat` [rows, k] times a [k, units] weight into FLOAT32 `o`, all int8
+  /// on the way (fullyInt8): QUANTIZE, a FULLY_CONNECTED of int8 in and out
+  /// with an int8 weight of one scale per output channel, DEQUANTIZE. The
+  /// MDLA's own kind of layer, at half the bytes of fp16 weights.
+  private mutating func int8FullyConnected(_ flat: Int, _ w: Constant, k: Int, units: Int, into o: Int, _ name: String) throws {
+    let values = try floats(w)
+    var bytes = [UInt8](repeating: 0, count: k * units)
+    var scales = [Float](repeating: 1, count: units)
+    for c in 0..<units {
+      var peak: Float = 0
+      for r in 0..<k { peak = max(peak, abs(values[r * units + c])) }
+      let scale = peak > 0 ? peak / 127 : 1
+      scales[c] = scale
+      for r in 0..<k {
+        bytes[c * k + r] = UInt8(bitPattern: Int8(min(max((values[r * units + c] / scale).rounded(), -127), 127)))
+      }
+    }
+    let weight = addTensor("\(w.name)__q8", [units, k], .int8, buffer: buffer(bytes))
+    model.tensors[weight].scales = scales
+    let rows = model.tensors[flat].shape[0]
+    let xq = addTensor("\(name)__xq", [rows, k], .int8)
+    model.tensors[xq].scales = [Self.int8InputRange / 127]
+    emit(.quantize, [flat], [xq], .quantize)
+    let yq = addTensor("\(name)__yq", [rows, units], .int8)
+    model.tensors[yq].scales = [Self.int8OutputRange / 127]
+    emit(.fullyConnected, [xq, weight, -1], [yq], .fullyConnected(keepNumDims: false))
+    emit(.dequantize, [yq], [o], .dequantize)
+    count("fully int8 FULLY_CONNECTEDs")
   }
 
   /// A convolution's or FULLY_CONNECTED's bias, a FLOAT32 constant of any

@@ -244,8 +244,10 @@ import Testing
       let int8 = environment["JETLINK_LITERT_INT8"] == "1"
       // JETLINK_LITERT_CUT=<fraction>: the first part of the graph only
       let cut = environment["JETLINK_LITERT_CUT"].flatMap(Double.init)
+      // JETLINK_LITERT_FP16IMG=1, JETLINK_LITERT_INT8FULL=1: the sweep's options
       let report = try LiteRTPreparation.prepare(
-        source: model, into: URL(fileURLWithPath: out, isDirectory: true), forNPU: true, int8Weights: int8, keepFraction: cut)
+        source: model, into: URL(fileURLWithPath: out, isDirectory: true), forNPU: true, int8Weights: int8, keepFraction: cut,
+        imagesFloat16: environment["JETLINK_LITERT_FP16IMG"] == "1", fullyInt8: environment["JETLINK_LITERT_INT8FULL"] == "1")
       if cut != nil { print("cut: \(report.summary)") }
     }
     // The GPU's conversion converts too; the checks are the NPU's.

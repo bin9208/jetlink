@@ -1,0 +1,65 @@
+diff --git a/litert/vendors/mediatek/dispatch/litert_dispatch_invocation_context.cc b/litert/vendors/mediatek/dispatch/litert_dispatch_invocation_context.cc
+index 4649b0a..d757800 100644
+--- a/litert/vendors/mediatek/dispatch/litert_dispatch_invocation_context.cc
++++ b/litert/vendors/mediatek/dispatch/litert_dispatch_invocation_context.cc
+@@ -12,6 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++#include <cstdlib>
+ #include "litert/vendors/mediatek/dispatch/litert_dispatch_invocation_context.h"
+ 
+ #include <array>
+@@ -323,6 +324,24 @@ LiteRtDispatchInvocationContextT::Create(
+                          "Failed to set execution boost hint");
+   }
+ 
++  // Jetlink Carrot: NeuroPilot's real-time deadline (ms) and CPU cache flush
++  // hint, from the environment, for timing what they do on a Dimensity's APU.
++  if (const char* deadline = std::getenv("JETLINK_NEURON_DEADLINE");
++      deadline != nullptr && neuron_adapter_api.api().execution_set_deadline) {
++    int status = neuron_adapter_api.api().execution_set_deadline(
++        execution->get(), static_cast<uint16_t>(std::atoi(deadline)));
++    LITERT_LOG(LITERT_INFO, "NeuronExecution_setDeadline(%s): %d", deadline,
++               status);
++  }
++  if (const char* flush = std::getenv("JETLINK_NEURON_CACHE_FLUSH");
++      flush != nullptr &&
++      neuron_adapter_api.api().execution_set_cache_flush_hint) {
++    int status = neuron_adapter_api.api().execution_set_cache_flush_hint(
++        execution->get(), static_cast<uint8_t>(std::atoi(flush)));
++    LITERT_LOG(LITERT_INFO, "NeuronExecution_setCacheFlushHint(%s): %d", flush,
++               status);
++  }
++
+   return Ptr(new LiteRtDispatchInvocationContextT(
+       neuron_adapter_api, device_context, model.release(),
+       compilation.release(), execution->release(), num_inputs, num_outputs));
+diff --git a/litert/vendors/mediatek/neuron_adapter_api.cc b/litert/vendors/mediatek/neuron_adapter_api.cc
+index 6c3d07a..91fb7af 100644
+--- a/litert/vendors/mediatek/neuron_adapter_api.cc
++++ b/litert/vendors/mediatek/neuron_adapter_api.cc
+@@ -176,6 +176,9 @@ litert::Expected<void> NeuronAdapterApi::LoadSymbols(
+   LOAD_SYMB(NeuronCompilation_storeCompiledNetwork,
+             api_->compilation_store_compiled_network);
+   LOAD_SYMB(NeuronExecution_setBoostHint, api_->execution_set_boost_hint);
++  LOAD_SYMB(NeuronExecution_setDeadline, api_->execution_set_deadline);
++  LOAD_SYMB(NeuronExecution_setCacheFlushHint,
++            api_->execution_set_cache_flush_hint);
+   LOAD_SYMB(NeuronExecution_setInputFromMemory,
+             api_->execution_set_input_from_memory);
+   LOAD_SYMB(NeuronExecution_setOutputFromMemory,
+diff --git a/litert/vendors/mediatek/neuron_adapter_api.h b/litert/vendors/mediatek/neuron_adapter_api.h
+index 2f38671..44460e5 100644
+--- a/litert/vendors/mediatek/neuron_adapter_api.h
++++ b/litert/vendors/mediatek/neuron_adapter_api.h
+@@ -166,6 +166,9 @@ struct NeuronAdapterApi::Api {
+   decltype(&NeuronExecution_create) execution_create = nullptr;
+   decltype(&NeuronExecution_free) execution_free = nullptr;
+   decltype(&NeuronExecution_setBoostHint) execution_set_boost_hint = nullptr;
++  decltype(&NeuronExecution_setDeadline) execution_set_deadline = nullptr;
++  decltype(&NeuronExecution_setCacheFlushHint) execution_set_cache_flush_hint =
++      nullptr;
+   decltype(&NeuronExecution_setInputFromMemory)
+       execution_set_input_from_memory = nullptr;
+   decltype(&NeuronExecution_setOutputFromMemory)
