@@ -77,14 +77,20 @@ public enum LiteRTPreparation {
   /// `int8Weights` (with `forNPU`) stores the MatMuls' weights int8, one
   /// scale per output channel, behind a DEQUANTIZE: half the bytes an NPU
   /// streams each run.
-  public static func prepare(source: URL, into directory: URL, forNPU: Bool = false, int8Weights: Bool = false) throws -> Report {
+  /// `keepFraction` (a diagnostic) keeps the first part of the converted
+  /// graph's operators, the weights' DEQUANTIZEs aside, with every tensor
+  /// the part makes that the rest reads as an output: for timing a model a
+  /// part at a time on an accelerator.
+  public static func prepare(
+    source: URL, into directory: URL, forNPU: Bool = false, int8Weights: Bool = false, keepFraction: Double? = nil
+  ) throws -> Report {
     let data = try Data(contentsOf: source, options: .alwaysMapped)
     return try data.withUnsafeBytes { buf in
-      try prepare(Source(bytes: buf), into: directory, forNPU: forNPU, int8Weights: int8Weights)
+      try prepare(Source(bytes: buf), into: directory, forNPU: forNPU, int8Weights: int8Weights, keepFraction: keepFraction)
     }
   }
 
-  private static func prepare(_ src: Source, into directory: URL, forNPU: Bool, int8Weights: Bool) throws -> Report {
+  private static func prepare(_ src: Source, into directory: URL, forNPU: Bool, int8Weights: Bool, keepFraction: Double?) throws -> Report {
     var (model, g) = try Decode.preparable(src)
     let stripped = try Patches.stripTinygradOps(&g, &model.opsets)
     guard let opset = model.opsets.first(where: { $0.domain.isEmpty || $0.domain == "ai.onnx" })?.version else {
@@ -104,6 +110,7 @@ public enum LiteRTPreparation {
       moved += m
       if r + f + m == 0 { break }
     }
+    if let keepFraction, keepFraction < 1 { cut(&lowered, keeping: keepFraction) }
     let (tflite, buffers) = TFLiteOptimizer.compact(lowered)
 
     // The flatbuffer is written with every weight's offset 0, then each
@@ -143,6 +150,28 @@ public enum LiteRTPreparation {
     return Report(
       url: url, stripped: stripped, operators: operators, lowerings: lowered.counts, transposesRemoved: removed, transposesMoved: moved,
       reshapesFused: fused, flatbufferBytes: flatbuffer.count, weightBytes: Int64(file.count - flatbuffer.count))
+  }
+
+  /// Keeps the first `fraction` of the operators after the leading
+  /// DEQUANTIZEs; the outputs become the graph's own that the kept part
+  /// makes and every tensor it makes that a dropped operator reads.
+  /// `compact` then drops what nothing kept reads.
+  static func cut(_ l: inout LiteRTLowering, keeping fraction: Double) {
+    let ops = l.model.operators
+    let lead = ops.prefix { $0.op == .dequantize }.count
+    let n = lead + Int((Double(ops.count - lead) * fraction).rounded())
+    let kept = ops[..<n]
+    // what the kept operators compute, the weights' DEQUANTIZEs not: a
+    // weight a dropped operator reads is no output, it goes with it
+    let produced = Set(ops[lead..<n].flatMap(\.outputs))
+    let read = Set(ops[n...].flatMap(\.inputs))
+    var outputs = l.model.outputs.filter(produced.contains)
+    // FLOAT32 ones only: an integer output beside the APU's partition is a
+    // part it might not take, and the integers are shapes and indices.
+    outputs += produced.filter { read.contains($0) && !outputs.contains($0) && l.model.tensors[$0].type == .float32 }.sorted()
+    l.model.operators = Array(kept)
+    l.model.outputs = outputs
+    l.counts["operators kept of \(ops.count - lead)"] = n - lead
   }
 
   static func align(_ n: Int) -> Int {

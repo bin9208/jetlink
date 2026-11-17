@@ -173,6 +173,30 @@ import Testing
     }
   }
 
+  /// A cut keeps the first part of the operators, with what it makes that
+  /// the rest reads as outputs, and computes what the whole graph computes
+  /// there; the weights the dropped part read go with it.
+  @Test func aCutKeepsTheFirstPartWithItsFrontierAsOutputs() throws {
+    let dir = try TemporaryDirectory()
+    let onnx = dir.url.appendingPathComponent("stack.onnx")
+    try SyntheticModels.writeLinearStack(layers: 4, width: 8, rows: 2, to: onnx)
+    let whole = try LiteRTPreparation.prepare(source: onnx, into: dir.url.appendingPathComponent("whole"), forNPU: true)
+    let half = try LiteRTPreparation.prepare(source: onnx, into: dir.url.appendingPathComponent("half"), forNPU: true, keepFraction: 0.5)
+    let (w, h) = (try TFLiteFile(whole.url), try TFLiteFile(half.url))
+    #expect(h.count("FULLY_CONNECTED") == 2 && w.count("FULLY_CONNECTED") == 4)
+    #expect(h.operators.count < w.operators.count && h.outputs.count == 1)
+    #expect(h.outputs.allSatisfy { h.tensors[$0].type == TFLite.TensorType.float32.rawValue })
+    let x = (0..<16).map { Float($0 % 5) - 2 }
+    var a = TFLiteInterpreter(w)
+    var b = TFLiteInterpreter(h)
+    _ = try a.run(["x": x])
+    let out = try b.run(["x": x])
+    // the half's output is a tensor the whole computed too, by name
+    let name = h.tensors[h.outputs[0]].name
+    let mid = try #require(w.tensor(named: name))
+    #expect(maxError(try #require(out[name]), try #require(a.values[mid])) < 1e-6)
+  }
+
   /// The NPU sweep's blocks of Light Speed 2's kinds of layers convert both
   /// ways and, all but attention (slow in the reference interpreter), run to
   /// finite outputs. JETLINK_SWEEP_OUT keeps each one's NPU conversion.
@@ -217,7 +241,11 @@ import Testing
     if let out = environment["JETLINK_LITERT_OUT"], !out.isEmpty {
       // JETLINK_LITERT_INT8=1: with int8 weights
       let int8 = environment["JETLINK_LITERT_INT8"] == "1"
-      _ = try LiteRTPreparation.prepare(source: model, into: URL(fileURLWithPath: out, isDirectory: true), forNPU: true, int8Weights: int8)
+      // JETLINK_LITERT_CUT=<fraction>: the first part of the graph only
+      let cut = environment["JETLINK_LITERT_CUT"].flatMap(Double.init)
+      let report = try LiteRTPreparation.prepare(
+        source: model, into: URL(fileURLWithPath: out, isDirectory: true), forNPU: true, int8Weights: int8, keepFraction: cut)
+      if cut != nil { print("cut: \(report.summary)") }
     }
     // The GPU's conversion converts too; the checks are the NPU's.
     print("converted for the GPU: \(try Self.convert(model).report.summary)")
