@@ -144,6 +144,14 @@ extension EngineHost {
                 frames: report.frames, frame: report.frame, report: nil, detail: detail)))
         }
         for line in lines { log.info("benchmark: \(line)") }
+        let checked = compareWithReference(l) { [weak self] detail in
+          self?.emit(
+            .benchmark(
+              BenchmarkEvent(
+                state: "running", elapsed: round2(report.seconds + ProcessInfo.processInfo.systemUptime - started), total: seconds,
+                frames: report.frames, frame: report.frame, report: nil, detail: detail)))
+        }
+        for line in checked { log.info("benchmark: \(line)") }
       }
       emit(
         .benchmark(

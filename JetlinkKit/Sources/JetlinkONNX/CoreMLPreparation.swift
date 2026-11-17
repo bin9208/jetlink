@@ -77,6 +77,9 @@ public enum CoreMLPreparation {
     /// Softmax masks given a finite fill for -inf (`finiteSoftmaxMasks`); 0
     /// unless the layout is `.aneWhole`.
     public let masks: Int
+    /// Constant Softmax masks made an fp16 bias the scores add
+    /// (`additiveSoftmaxMasks`); 0 unless the layout is `.aneWhole`.
+    public var biasMasks: Int = 0
     public let parts: [Part]
   }
 
@@ -129,9 +132,11 @@ public enum CoreMLPreparation {
     var norms = 0
     var heads = 0
     var masks = 0
+    var biasMasks = 0
     if layout == .aneWhole {
       norms = try Patches.prescaleLayerNorm(&g)
       heads = try Patches.headsInFP32(&g, src)
+      biasMasks = try Patches.additiveSoftmaxMasks(&g, src)
       masks = try Patches.finiteSoftmaxMasks(&g, src)
     }
     model.graph = g
@@ -150,9 +155,11 @@ public enum CoreMLPreparation {
       parts[i].model.props.append(Prop(raw: nil, key: cacheKeyProp, value: cacheKey(parts[i].name)))
     }
     let reported = try write(parts, src, into: directory, progress: progress)
-    return Report(
+    var report = Report(
       stripped: stripped, retypedImages: retyped, gathers: gathers, gemms: gemms, tiles: tiles,
       norms: norms, heads: heads, masks: masks, parts: reported)
+    report.biasMasks = biasMasks
+    return report
   }
 
   /// Encodes each part and streams it to `<name>.onnx` in `directory`; on a

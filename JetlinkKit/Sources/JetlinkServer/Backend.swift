@@ -93,10 +93,15 @@ public protocol EngineBackend: AnyObject, Sendable {
   /// NPU sweep on a MediaTek phone. Works in `directory`, says how far it is
   /// through `progress`, and returns lines for the log. Nothing by default.
   func afterBenchmark(directory: URL, progress: @escaping (String) -> Void) -> [String]
+  /// The same runtime on the CPU, for checking an accelerator's results
+  /// against (`EngineHost.compareWithReference`); nil when this already is
+  /// the CPU or the backend has none.
+  func referenceBackend() -> (any EngineBackend)?
 }
 
 extension EngineBackend {
   public func afterBenchmark(directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
+  public func referenceBackend() -> (any EngineBackend)? { nil }
 }
 
 extension Engine {

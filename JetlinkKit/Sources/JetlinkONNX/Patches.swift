@@ -513,6 +513,93 @@ enum Patches {
     return changed
   }
 
+  // MARK: additive_softmax_masks
+
+  /// Rewrites every Softmax input `Where(c, a, b)` whose condition is a
+  /// constant bool mask, `M` or `Not(M)`, and whose one other branch is an
+  /// fp16 initializer holding -inf alone, as `Add(scores, bias)`: `bias` an
+  /// fp16 constant of the mask's shape, 0 where the scores pass and
+  /// `softmaxMaskFill` where the fill did. Returns how many Wheres changed.
+  ///
+  /// carrot's N16 masks its 12 temporal attentions with a fixed causal
+  /// `_supercombo_mask` (bool, 1x1x288x288) through Not and Where. On a
+  /// Snapdragon 8 Elite (HTP v79) its plan still jumped metres in a frame
+  /// while driving after the -inf fill went finite, and the benchmark,
+  /// whose fixed input makes every remembered frame alike, cannot see a
+  /// wrong mask: any mix of equal rows is the same row. Adding a constant
+  /// leaves the HTP no bool tensor, Not or Where to get wrong. A passing
+  /// score gains 0; a masked one, at most a few hundred, ends near -10000,
+  /// whose exp is 0 in fp16 as the fill's was. onnxruntime's CPU gives N16
+  /// the same outputs both ways.
+  static func additiveSoftmaxMasks(_ g: inout Graph, _ src: Source) throws -> Int {
+    var producer: [String: Int] = [:]
+    for (i, n) in g.nodes.enumerated() {
+      for out in n.outputs { producer[out] = i }
+    }
+    var initializers: [String: Tensor] = [:]
+    for t in g.initializers { initializers[t.key] = t }
+    func negInfFill(_ name: String) throws -> Bool {
+      guard let t = initializers[name], t.elementType == DataType.float16, t.elementCount == 1 else { return false }
+      let bytes = try Elements.littleEndian(t, src)
+      return bytes.count == 2 && bytes[0] == 0x00 && bytes[1] == 0xFC
+    }
+    let pass = [UInt8](repeating: 0, count: 2)
+    let fillBits = softmaxMaskFill.bitPattern.littleEndian
+    let fill = [UInt8(truncatingIfNeeded: fillBits), UInt8(truncatingIfNeeded: fillBits >> 8)]
+    var biases: [[UInt8]: String] = [:]
+    var added: [Tensor] = []
+    var changed = 0
+    for softmax in g.nodes where softmax.op == "Softmax" {
+      guard let x = softmax.inputs.first, let w = producer[x], g.nodes[w].op == "Where", g.nodes[w].inputs.count == 3 else { continue }
+      let wh = g.nodes[w]
+      // The bool mask and whether the condition is its negation.
+      var maskName = wh.inputs[0]
+      var negated = false
+      if initializers[maskName] == nil, let c = producer[maskName], g.nodes[c].op == "Not", g.nodes[c].inputs.count == 1 {
+        maskName = g.nodes[c].inputs[0]
+        negated = true
+      }
+      guard let mask = initializers[maskName], mask.elementType == DataType.bool, mask.elementCount > 0 else { continue }
+      // Which branch is the -inf fill; the other carries the scores.
+      let fillWhenTrue: Bool
+      let scores: String
+      if try negInfFill(wh.inputs[1]), initializers[wh.inputs[2]] == nil {
+        fillWhenTrue = true
+        scores = wh.inputs[2]
+      } else if try negInfFill(wh.inputs[2]), initializers[wh.inputs[1]] == nil {
+        fillWhenTrue = false
+        scores = wh.inputs[1]
+      } else {
+        continue
+      }
+      let bits = try Elements.littleEndian(mask, src)
+      guard bits.count == mask.elementCount else { continue }
+      var raw = [UInt8]()
+      raw.reserveCapacity(bits.count * 2)
+      for b in bits {
+        let condition = (b != 0) != negated
+        raw.append(contentsOf: condition == fillWhenTrue ? fill : pass)
+      }
+      let name: String
+      if let made = biases[raw] {
+        name = made
+      } else {
+        name = "jetlink_softmax_mask_bias_\(biases.count)"
+        added.append(Tensor(name: name, dims: mask.dims, dataType: DataType.float16, raw: .owned(raw)))
+        biases[raw] = name
+      }
+      g.nodes[w] = Node(inputs: [scores, name], outputs: wh.outputs, name: wh.name, opType: "Add", domain: wh.domain)
+      changed += 1
+    }
+    guard changed > 0 else { return 0 }
+    g.initializers.append(contentsOf: added)
+    // The Nots that only fed the rewritten Wheres.
+    var read = Set(g.outputs.map(\.key))
+    for n in g.nodes { read.formUnion(n.inputs) }
+    g.nodes.removeAll { $0.op == "Not" && !$0.outputs.contains(where: read.contains) }
+    return changed
+  }
+
   // MARK: vision_heads
 
   /// The indices, in graph order, of the heads that end the vision trunk:

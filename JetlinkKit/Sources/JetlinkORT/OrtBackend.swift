@@ -76,12 +76,13 @@ public enum OrtProfile: String, CaseIterable, Sendable {
 
   /// What a build writes: 5 is every graph split on `ane` and Expand as Tile
   /// on both, 6 the plain graph, 7 the whole graph for the Neural Engine or
-  /// the Hexagon NPU with finite attention masks. An artifact prepared under
+  /// the Hexagon NPU with finite attention masks, 8 that with constant
+  /// attention masks as an added fp16 bias. An artifact prepared under
   /// another rebuilds.
   public var prepareVersion: Int {
     switch layout {
     case .plain: 6
-    case .aneWhole: 7
+    case .aneWhole: 8
     case .split, .whole: 5
     }
   }
@@ -160,6 +161,13 @@ public final class OrtBackend: EngineBackend {
   }
 
   public var runtimeVersion: String { OrtRuntime.version }
+
+  /// onnxruntime on the CPU for the same chip: what a benchmark checks the
+  /// NPU's or the GPU's results against.
+  public func referenceBackend() -> (any EngineBackend)? {
+    guard profile != .cpu, OrtProfile.available.contains(.cpu) else { return nil }
+    return OrtBackend(profile: .cpu, preparer: preparer, keepAlive: false, keepCPUWarm: false, chip: chip)
+  }
 
   /// Carrot's auxiliary camera models: on QNN's GPU where this profile has
   /// QNN (a Snapdragon), so the NPU stays the driving model's, else the CPU.
