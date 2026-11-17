@@ -21,7 +21,8 @@ extension LFS {
   static func download(
     href: String, pointer: Pointer, dest: URL, session: URLSession,
     progress: @escaping @Sendable (Double) -> Void,
-    shouldStop: @escaping @Sendable () -> Bool
+    shouldStop: @escaping @Sendable () -> Bool,
+    timeout: TimeInterval = connectTimeout
   ) async throws(RegistryError) -> URL {
     let directory = dest.deletingLastPathComponent()
     try? Files.makeDirectory(directory)
@@ -45,7 +46,7 @@ extension LFS {
         throw RegistryError.network("could not download \(short): cannot write \(part.path(percentEncoded: false))")
       }
       var request = URLRequest(url: url)
-      request.timeoutInterval = connectTimeout
+      request.timeoutInterval = timeout
       let transfer = Transfer(pointer: pointer, handle: handle, progress: progress, shouldStop: shouldStop)
       outcome = try await transfer.run(request, session: session).get()
     } catch {

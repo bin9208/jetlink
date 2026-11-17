@@ -88,6 +88,8 @@ class ServerController(private val context: Context, private val scope: Coroutin
         put("backend", processor.backend.id)
         put("device", processor.device)
         put("keep_alive", settings.keepNpuAwake)
+        // the test app tries the NPU's shared memory; the main app once a phone that has it has run it
+        put("npu_shared_memory", io.zoompilot.jetlink.BuildConfig.CHANNEL == "test")
         put("keep_cpu_warm", settings.keepCpuAwake)
         put("port", settings.port)
         // Bench tools reach the server over Wi-Fi or `adb forward`; the comma

@@ -157,7 +157,15 @@ public final class OrtBackend: EngineBackend {
   /// `chip` names what the artifacts are valid for: on Android the SoC's
   /// model, "SM8650" (Build.SOC_MODEL), which a QNN context is compiled for.
   /// Nil is the Apple chip on Apple platforms and "cpu" elsewhere.
-  public init(profile: OrtProfile, preparer: any ModelPreparer, keepAlive: Bool = true, keepCPUWarm: Bool = true, chip: String? = nil) {
+  /// Whether a load tries QNN's HTP shared memory (`loadEngine`): the test
+  /// app's, until a phone that has it has run it.
+  public let tryNpuSharedMemory: Bool
+
+  public init(
+    profile: OrtProfile, preparer: any ModelPreparer, keepAlive: Bool = true, keepCPUWarm: Bool = true, chip: String? = nil,
+    tryNpuSharedMemory: Bool = false
+  ) {
+    self.tryNpuSharedMemory = tryNpuSharedMemory
     self.profile = profile
     self.preparer = preparer
     self.keepAlive = keepAlive
@@ -357,7 +365,7 @@ public final class OrtBackend: EngineBackend {
   /// The engine with its buffers in the NPU's shared memory where the phone
   /// can, else as before.
   private func loadEngine(_ plans: [SessionPlan]) throws -> OrtEngine {
-    if profile == .htpWhole {
+    if profile == .htpWhole && tryNpuSharedMemory {
       do {
         let shared = plans.map { $0.with(option: OrtBackend.sharedMemoryOption, "1") }
         return try OrtEngine(plans: shared, device: deviceTag(), keepAlive: keepAlive, keepCPUWarm: keepCPUWarm, sharedMemory: true)
@@ -379,9 +387,10 @@ public final class OrtBackend: EngineBackend {
     guard let (manifest, _) = try? OrtArtifact.open(artifact, version: profile.prepareVersion, check: { _ in nil }) else {
       return ["variants: the artifact did not open"]
     }
-    let variants: [(name: String, shared: Bool, rpc: Bool)] = [
-      ("plain", false, false), ("rpc 100us", false, true), ("shared memory", true, false), ("shared memory + rpc 100us", true, true),
-    ]
+    var variants: [(name: String, shared: Bool, rpc: Bool)] = [("plain", false, false), ("rpc 100us", false, true)]
+    if tryNpuSharedMemory {
+      variants += [("shared memory", true, false), ("shared memory + rpc 100us", true, true)]
+    }
     var results: [String] = []
     for (i, v) in variants.enumerated() {
       progress("variants: \(i + 1)/\(variants.count) \(v.name)")

@@ -274,8 +274,23 @@ public final class Registry: Sendable {
       return dest
     }
     if let known = KnownModels.bySHA(pointer.oid), known.bytes == pointer.size {
-      Registry.log.info("fetching \(known.name, privacy: .public) (\(pointer.size >> 20) MB) from carrot's model library")
-      return try await LFS.download(href: known.url, pointer: pointer, dest: dest, session: session, progress: progress, shouldStop: shouldStop)
+      // carrot's model library can sit on a first byte for over 30 s (a
+      // Galaxy Tab S9 timed out twice before its third try got N16): wait
+      // longer, and try again before giving up.
+      var last: RegistryError?
+      for attempt in 1...KnownModels.attempts {
+        if shouldStop() { break }
+        Registry.log.info("fetching \(known.name, privacy: .public) (\(pointer.size >> 20) MB) from carrot's model library, try \(attempt)")
+        do {
+          return try await LFS.download(
+            href: known.url, pointer: pointer, dest: dest, session: session, progress: progress, shouldStop: shouldStop,
+            timeout: KnownModels.timeout)
+        } catch {
+          last = error
+          if case .verify = error.kind { throw error }
+        }
+      }
+      throw last ?? .network("could not download \(known.name)")
     }
     for endpoint in LFS.endpoints {
       guard let href = await LFS.resolve(endpoint: endpoint, pointer: pointer, session: session) else { continue }
@@ -615,6 +630,11 @@ public enum KnownModels {
       name: "N16 Nav (carrot)", shortName: "N16",
       url: "https://upload.shind0.synology.me/models/comma4-big-nav-n16-96244b1f/big_driving_supercombo.onnx")
   ]
+
+  /// How long a download from carrot's model library may wait for data, and
+  /// how many times it is tried.
+  static let timeout: TimeInterval = 90
+  static let attempts = 3
 
   public static let names: [String: String] = Dictionary(uniqueKeysWithValues: all.map { ($0.sha256, $0.name) })
   public static func bySHA(_ sha256: String) -> Known? { all.first { $0.sha256 == sha256 } }
