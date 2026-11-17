@@ -132,7 +132,7 @@ struct ControllerTests {
       _ = try await log.wait { if case .server = $0 { true } else { false } }
       _ = try await log.wait { if case .link(let link) = $0 { link.state == .waiting } else { false } }
       _ = try await log.wait { if case .engine(let engine) = $0 { engine.state == .none } else { false } }
-      _ = try await log.wait { if case .catalog(let catalog) = $0 { catalog.models.count == 1 } else { false } }
+      _ = try await log.wait { if case .catalog(let catalog) = $0 { catalog.models.count == 1 + KnownModels.all.count } else { false } }
       _ = try await log.wait { if case .inventory = $0 { true } else { false } }
     }
   }

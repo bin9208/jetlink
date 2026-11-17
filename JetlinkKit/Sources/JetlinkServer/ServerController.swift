@@ -196,7 +196,7 @@ public final class ServerController: @unchecked Sendable {
   }
 
   private func catalogPayload(error: String? = nil) -> CatalogEvent {
-    let cached = registry.cachedCatalog() ?? CatalogEvent(fetchedAt: nil, url: "", defaultRef: "", error: nil, models: [])
+    let cached = (registry.cachedCatalog() ?? CatalogEvent(fetchedAt: nil, url: "", defaultRef: "", error: nil, models: [])).withKnownModels()
     guard let error else { return cached }
     return CatalogEvent(fetchedAt: cached.fetchedAt, url: cached.url, defaultRef: cached.defaultRef, error: error, models: cached.models)
   }
@@ -392,7 +392,7 @@ public final class ServerController: @unchecked Sendable {
   }
 
   private func refreshCatalog(_ refresh: Bool) async {
-    publish(.catalog(await registry.catalog(refresh: refresh, maxAge: ServerController.catalogMaxAge)))
+    publish(.catalog(await registry.catalog(refresh: refresh, maxAge: ServerController.catalogMaxAge).withKnownModels()))
   }
 
   // MARK: downloads

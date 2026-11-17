@@ -32,3 +32,19 @@ struct NamedModelTests {
     #expect(registry.localModels().count == 1)
   }
 }
+
+struct KnownCatalogTests {
+  @Test func carrotsN16IsInTheCatalogFirstEvenOffline() async throws {
+    let tmp = try TemporaryDirectory()
+    let registry = Registry(layout: tmp.layout, session: MockNet([:]).session)
+    let catalog = await registry.catalog().withKnownModels()
+    #expect(await registry.catalog().models.isEmpty, "the index itself stays as served")
+    let n16 = try #require(catalog.models.first)
+    #expect(n16.name == "N16 Nav (carrot)" && n16.sha256?.hasPrefix("01effc679eb46d60") == true && n16.bytes == 814_591_107)
+    #expect(n16.ref == String(n16.sha256!.prefix(40)))
+    let pointer = try await registry.resolve(ref: n16.ref)
+    #expect(pointer.oid == n16.sha256 && pointer.size == 814_591_107)
+    #expect(try await registry.pointer(for: n16.sha256!) == pointer)
+    #expect(registry.size(for: n16.sha256!) == 814_591_107)
+  }
+}

@@ -169,6 +169,7 @@ public final class Registry: Sendable {
     guard CacheLayout.isRef(ref) else {
       throw .registry("\(JSON.pythonRepr(ref)) is not a 40 character commit")
     }
+    if let known = KnownModels.byRef(ref) { return known.pointer }
     return try await lookup({ $0.pointer(ref: ref) }, missing: "\(ref.prefix(10)) is not in the model index")
   }
 
@@ -189,7 +190,7 @@ public final class Registry: Sendable {
   /// The size the model index gives an ONNX, nil for one it does not know.
   /// Disk only.
   public func size(for sha256: String) -> Int64? {
-    modelIndex()?.size(oid: sha256)
+    modelIndex()?.size(oid: sha256) ?? KnownModels.bySHA(sha256)?.bytes
   }
 
   /// A human name and a ref for a model identity; either may be nil.
@@ -272,6 +273,10 @@ public final class Registry: Sendable {
     if let status = Files.status(dest), status.isFile, status.size == pointer.size {
       return dest
     }
+    if let known = KnownModels.bySHA(pointer.oid), known.bytes == pointer.size {
+      Registry.log.info("fetching \(known.name, privacy: .public) (\(pointer.size >> 20) MB) from carrot's model library")
+      return try await LFS.download(href: known.url, pointer: pointer, dest: dest, session: session, progress: progress, shouldStop: shouldStop)
+    }
     for endpoint in LFS.endpoints {
       guard let href = await LFS.resolve(endpoint: endpoint, pointer: pointer, session: session) else { continue }
       Registry.log.info("fetching \(pointer.oid.prefix(16), privacy: .public) (\(pointer.size >> 20) MB) from \(endpoint, privacy: .public)")
@@ -287,6 +292,7 @@ public final class Registry: Sendable {
       return try await resolve(ref: refOrSHA256)
     }
     if CacheLayout.isSHA256(refOrSHA256) {
+      if let known = KnownModels.bySHA(refOrSHA256) { return known.pointer }
       let size = try await lookup(
         { $0.size(oid: refOrSHA256) }, missing: "size for \(refOrSHA256.prefix(16)) unknown: it is not in the model index")
       return Pointer(oid: refOrSHA256, size: size)
@@ -584,13 +590,55 @@ public final class Registry: Sendable {
   }
 }
 
-/// Models no catalog lists that the apps should still name: carrot's own
-/// driving models, which a comma uploads. A comma also names its pick in its
-/// hello (`Registry.nameModel`); this covers a comma too old to, and a model
-/// uploaded before this build.
+/// Models no catalog lists that the apps should still show, name and fetch:
+/// carrot's own driving models. A comma also names its pick in its hello
+/// (`Registry.nameModel`); this covers a comma too old to, a model uploaded
+/// before this build, and an app with nothing yet (the test app has its own
+/// storage), which can download it here rather than wait for the comma.
 public enum KnownModels {
-  public static let names: [String: String] = [
-    // carrot's navigation model (Navigate on openpilot), 814,591,107 bytes
-    "01effc679eb46d6036ce0302673a87fe2dcfcc95a679daeeb929679e53c3647a": "N16 Nav (carrot)"
+  public struct Known: Sendable {
+    public let sha256: String
+    public let bytes: Int64
+    public let name: String
+    public let shortName: String
+    /// Where carrot's model library keeps the ONNX a Jetlink host runs.
+    public let url: String
+    /// Its catalog row's identity: a ref must be 40 hex, so the sha's first 40.
+    public var ref: String { String(sha256.prefix(40)) }
+    public var pointer: Pointer { Pointer(oid: sha256, size: bytes) }
+  }
+
+  public static let all: [Known] = [
+    // carrot's navigation model (Navigate on openpilot)
+    Known(
+      sha256: "01effc679eb46d6036ce0302673a87fe2dcfcc95a679daeeb929679e53c3647a", bytes: 814_591_107,
+      name: "N16 Nav (carrot)", shortName: "N16",
+      url: "https://upload.shind0.synology.me/models/comma4-big-nav-n16-96244b1f/big_driving_supercombo.onnx")
   ]
+
+  public static let names: [String: String] = Dictionary(uniqueKeysWithValues: all.map { ($0.sha256, $0.name) })
+  public static func bySHA(_ sha256: String) -> Known? { all.first { $0.sha256 == sha256 } }
+  public static func byRef(_ ref: String) -> Known? { all.first { $0.ref == ref } }
+
+  /// Catalog rows for them, first in the list, for any the index lacks.
+  public static func catalogRows(besides models: [CatalogModel]) -> [CatalogModel] {
+    let listed = Set(models.compactMap(\.sha256))
+    let top = (models.map(\.index).max() ?? 0) + all.count
+    return all.enumerated().compactMap { i, known in
+      listed.contains(known.sha256)
+        ? nil
+        : CatalogModel(
+          name: known.name, shortName: known.shortName, ref: known.ref, buildTime: "", index: top - i, sha256: known.sha256,
+          bytes: known.bytes, folder: "Carrot")
+    }
+  }
+}
+
+extension CatalogEvent {
+  /// The catalog with carrot's own models first (`KnownModels`), as the
+  /// apps list it: the index itself stays as served.
+  public func withKnownModels() -> CatalogEvent {
+    CatalogEvent(
+      fetchedAt: fetchedAt, url: url, defaultRef: defaultRef, error: error, models: KnownModels.catalogRows(besides: models) + models)
+  }
 }
