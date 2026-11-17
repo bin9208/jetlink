@@ -40,7 +40,8 @@ import Testing
     let data = try Data(contentsOf: output)
     try data.withUnsafeBytes { bytes in
       let (m, g) = try Decode.preparable(Source(bytes: bytes))
-      #expect(m.opsets.first { $0.domain.isEmpty }?.version == 21)
+      #expect(m.opsets.first { $0.domain.isEmpty }?.version == 20)
+      #expect(m.opsets.first { $0.domain == "com.microsoft" }?.version == 1)
       #expect(g.outputs.map(\.key) == ["y"] && g.inputs.map(\.key) == ["new_img"])
       #expect(g.nodes.filter { $0.op == "QuantizeLinear" }.count == 2)
       #expect(g.initializers.contains { $0.elementType == DataType.uint8 })

@@ -84,9 +84,10 @@ public enum W8A16Preparation {
       let selected = try targets(g, visionOnly: visionOnly)
       guard !selected.isEmpty else { throw OnnxError("no W8A16 targets") }
       let count = try rewrite(&g, src, selected: selected, ranges: ranges)
-      // uint16 Q/DQ entered the standard ONNX domain at opset 21.
-      model.opsets = model.opsets.map {
-        $0.domain.isEmpty && $0.version < 21 ? OpsetImport(raw: nil, domain: "", version: 21) : $0
+      // ORT's QNN quantizer uses contrib Q/DQ for uint16 before opset 21.
+      // N16's local functions import opset 20; retain their schema versions.
+      if !model.opsets.contains(where: { $0.domain == "com.microsoft" }) {
+        model.opsets.append(OpsetImport(raw: nil, domain: "com.microsoft", version: 1))
       }
       model.graph = g
       try PartWriter.write(Encode.model(model, src), src, to: output, onWrite: { _ in })
@@ -165,11 +166,11 @@ public enum W8A16Preparation {
       nodes.append(
         Node(
           inputs: [input, prefix + "_scale", prefix + "_zero"], outputs: [prefix + "_q"],
-          name: prefix + "_Q", opType: "QuantizeLinear"))
+          name: prefix + "_Q", opType: "QuantizeLinear", domain: "com.microsoft"))
       nodes.append(
         Node(
           inputs: [prefix + "_q", prefix + "_scale", prefix + "_zero"], outputs: [prefix + "_dq"],
-          name: prefix + "_DQ", opType: "DequantizeLinear"))
+          name: prefix + "_DQ", opType: "DequantizeLinear", domain: "com.microsoft"))
       return prefix + "_dq"
     }
     for (i, original) in g.nodes.enumerated() {
@@ -214,7 +215,7 @@ public enum W8A16Preparation {
       nodes.append(
         Node(
           inputs: [prefix + "_w", prefix + "_ws", prefix + "_wz"], outputs: [prefix + "_wdq"],
-          name: prefix + "_WDQ", opType: "DequantizeLinear"))
+          name: prefix + "_WDQ", opType: "DequantizeLinear", domain: "com.microsoft"))
       var node = original
       node.inputs[0] = dqInput
       node.inputs[1] = prefix + "_wdq"
@@ -238,7 +239,7 @@ public enum W8A16Preparation {
         nodes.append(
           Node(
             inputs: [prefix + "_b", prefix + "_bs", prefix + "_bz"], outputs: [prefix + "_bdq"],
-            name: prefix + "_BDQ", opType: "DequantizeLinear"))
+            name: prefix + "_BDQ", opType: "DequantizeLinear", domain: "com.microsoft"))
         node.inputs[2] = prefix + "_bdq"
         replaced.insert(b.key)
       }
