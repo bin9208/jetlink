@@ -97,15 +97,20 @@ enum class Processor(val backend: Backend, val device: String, val title: String
 
         /**
          * Automatic's pick: a Google Tensor's NPU, which runs on the GPU any
-         * model it cannot compile; the CPU on the emulator; else the GPU. A
-         * Snapdragon stays on the GPU: QNN's NPU has run on no phone, and 20
-         * of Cinque Terre V3's 44 vision LayerNorms overflow float16 when
-         * computed step by step, which would give wrong outputs rather than
-         * an error to fall back on.
+         * model it cannot compile; the CPU on the emulator; a Snapdragon with
+         * a Hexagon NPU QNN runs fp16 on (v69 and later: the 8 Gen 1 on) its
+         * whole-graph NPU; else the GPU. QNN's NPU runs carrot's N16 and
+         * Light Speed 2 right on an 8 Gen 2 and an 8 Elite now that the
+         * vision norms are prescaled; LiteRT's GPU on an 8 Gen 2 gave Light
+         * Speed 2 non-finite outputs on 27 of 34 frames, at 68 ms. A
+         * Snapdragon whose generation this app does not know is taken for a
+         * new one when it is an 8-series (SM8...).
          */
-        fun automatic(tensorNpu: Boolean, emulator: Boolean): Processor = when {
+        fun automatic(tensorNpu: Boolean, emulator: Boolean, hexagon: Int? = null, qualcommModel: String? = null): Processor = when {
             emulator -> Cpu
             tensorNpu -> TensorNpu
+            hexagon != null -> if (hexagon >= 69) Npu else Gpu
+            qualcommModel != null && qualcommModel.uppercase().startsWith("SM8") -> Npu
             else -> Gpu
         }
 

@@ -40,8 +40,12 @@ class ProcessorTest {
     @Test
     fun automaticPicksATensorsNpuAndElseTheGpu() {
         assertEquals(Processor.TensorNpu, Processor.automatic(tensorNpu = true, emulator = false))
-        // a Snapdragon too, until QNN's NPU outputs are checked on a phone
         assertEquals(Processor.Gpu, Processor.automatic(tensorNpu = false, emulator = false))
+        // a Snapdragon with an NPU QNN runs: its whole-graph NPU
+        assertEquals(Processor.Npu, Processor.automatic(tensorNpu = false, emulator = false, hexagon = 73, qualcommModel = "SM8550"))
+        assertEquals(Processor.Npu, Processor.automatic(tensorNpu = false, emulator = false, hexagon = null, qualcommModel = "SM8750P"))
+        assertEquals(Processor.Gpu, Processor.automatic(tensorNpu = false, emulator = false, hexagon = 68, qualcommModel = "SM8350"))
+        assertEquals(Processor.Gpu, Processor.automatic(tensorNpu = false, emulator = false, hexagon = null, qualcommModel = "SM7450"))
         assertEquals(Processor.Cpu, Processor.automatic(tensorNpu = false, emulator = true))
         assertEquals(Processor.TensorNpu, Processor.Auto.resolved(Processor.TensorNpu))
         assertEquals(Processor.Gpu, Processor.Gpu.resolved(Processor.TensorNpu))

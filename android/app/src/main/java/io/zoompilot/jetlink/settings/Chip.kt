@@ -47,7 +47,9 @@ object Chip {
     fun processors(current: Processor): List<Processor> = Processor.choices(isQualcomm, hasLiteRtNpu, isEmulator, current)
 
     /** What Automatic runs on here. */
-    val automatic: Processor by lazy { Processor.automatic(hasTensorNpu, isEmulator) }
+    val automatic: Processor by lazy {
+        Processor.automatic(hasTensorNpu, isEmulator, hexagon = if (isQualcomm) hexagon else null, qualcommModel = if (isQualcomm) model else null)
+    }
 
     val isEmulator: Boolean
         get() = Build.HARDWARE.contains("ranchu") || Build.HARDWARE.contains("goldfish") || Build.PRODUCT.contains("sdk")
@@ -61,6 +63,7 @@ object Chip {
         "SM8650" to ("Snapdragon 8 Gen 3" to 75),
         "SM8635" to ("Snapdragon 8s Gen 3" to 73),
         "SM8750" to ("Snapdragon 8 Elite" to 79),
+        "SM8750P" to ("Snapdragon 8 Elite" to 79),
         "SM8850" to ("Snapdragon 8 Elite Gen 5" to 81),
     )
 
