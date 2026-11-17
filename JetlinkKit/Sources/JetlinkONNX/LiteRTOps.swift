@@ -515,12 +515,18 @@ extension LiteRTLowering {
     let tensors = try parts.map { try tensor($0) }
     let o = try define(n.outputs[0], out, model.tensors[tensors[0]].type)
     if rank > Self.gpuRank {
-      // Above rank 4, on [outer, axis, inner] views of every part.
+      // Above rank 4, on [outer, axis, inner] views of every part; for the
+      // NPU on rank-4 views that merge as few neighbours as it takes
+      // (concatView), as sliceView's minimal ones do.
       let outer = out[..<axis].reduce(1, *)
       let inner = out[(axis + 1)...].reduce(1, *)
-      let views = tensors.enumerated().map { k, t in reshaped(t, [outer, model.tensors[t].shape[axis], inner], "\(n.outputs[0])__view\(k)") }
-      let joined = addTensor("\(n.outputs[0])__joined", [outer, out[axis], inner], model.tensors[o].type)
-      emit(.concatenation, views, [joined], .concatenation(axis: 1))
+      let (groups, at) = forNPU ? Self.concatView(out, axis: axis) : ([Array(0..<axis), [axis], Array((axis + 1)..<rank)], 1)
+      func view(_ shape: [Int]) -> [Int] {
+        forNPU ? groups.map { $0.reduce(1) { $0 * shape[$1] } } : [outer, shape[axis], inner]
+      }
+      let views = tensors.enumerated().map { k, t in reshaped(t, view(model.tensors[t].shape), "\(n.outputs[0])__view\(k)") }
+      let joined = addTensor("\(n.outputs[0])__joined", view(out), model.tensors[o].type)
+      emit(.concatenation, views, [joined], .concatenation(axis: Int32(at)))
       emit(.reshape, [joined, int32Tensor(out, "\(n.outputs[0])__shape")], [o], .reshape(newShape: out.map { Int32($0) }))
       count("rank-\(rank) concatenations on a view")
       return
@@ -590,7 +596,9 @@ extension LiteRTLowering {
   mutating func emitSlice(_ i: Int, begin: [Int], end: [Int], step: [Int], into o: Int, _ name: String) {
     let shape = model.tensors[i].shape
     let out = model.tensors[o].shape
-    if shape.count > Self.gpuRank, let v = Self.sliceView(shape: shape, begin: begin, end: end, step: step, out: out), v.shape.count <= Self.gpuRank {
+    if shape.count > Self.gpuRank, let v = Self.sliceView(shape: shape, begin: begin, end: end, step: step, out: out, minimal: forNPU),
+      v.shape.count <= Self.gpuRank
+    {
       let input = reshaped(i, v.shape, "\(name)__view")
       let sliced = addTensor("\(name)__sliced", v.out, model.tensors[i].type)
       emitSlice(input, begin: v.begin, end: v.end, step: v.step, into: sliced, name)
@@ -619,23 +627,60 @@ extension LiteRTLowering {
   /// The largest rank LiteRT's GPU takes.
   static let gpuRank = 4
 
+  /// A rank-4 grouping of `shape`'s axes for a concatenation along `axis`:
+  /// the axis alone, the others merged with a neighbour as few times as it
+  /// takes, the pair whose product is smallest first. Returns the groups in
+  /// order and the axis's place among them.
+  static func concatView(_ shape: [Int], axis: Int) -> (groups: [[Int]], axis: Int) {
+    var groups = shape.indices.map { [$0] }
+    while groups.count > gpuRank {
+      let pairs = groups.indices.dropLast().filter { !groups[$0].contains(axis) && !groups[$0 + 1].contains(axis) }
+      guard let k = pairs.min(by: { a, b in
+        (groups[a] + groups[a + 1]).reduce(1) { $0 * shape[$1] } < (groups[b] + groups[b + 1]).reduce(1) { $0 * shape[$1] }
+      })
+      else { break }
+      groups[k] += groups[k + 1]
+      groups.remove(at: k + 1)
+    }
+    return (groups, groups.firstIndex { $0.contains(axis) }!)
+  }
+
   /// A slice of a tensor of rank above 4 as a slice of a smaller view of
   /// it: axes of size 1 dropped and, if that leaves more than 4, each run of
   /// neighbouring axes the slice takes whole merged into one. Merging no
   /// more than that keeps the view's last axes the tensor's, so the RESHAPEs
   /// around it are more often ones that cancel than copies on the GPU. nil
   /// when nothing can go.
-  static func sliceView(shape: [Int], begin: [Int], end: [Int], step: [Int], out: [Int])
+  ///
+  /// `minimal` (the NPU's) merges no more neighbours than it takes to get
+  /// to rank 4, the pair whose product is smallest first: Light Speed 2's
+  /// image queue [2, 5, 6, 128, 256] sliced along its frames becomes
+  /// [2, 5, 768, 256] rather than [2, 5, 196608]. MediaTek's MDLA ran the
+  /// model's first 260 operators, these views among them, in 2 s; the 2580
+  /// after them added 36 ms.
+  static func sliceView(shape: [Int], begin: [Int], end: [Int], step: [Int], out: [Int], minimal: Bool = false)
     -> (shape: [Int], begin: [Int], end: [Int], step: [Int], out: [Int])?
   {
     let merge = shape.filter { $0 != 1 }.count > gpuRank
     var groups: [(whole: Bool, axes: [Int])] = []
     for k in shape.indices where shape[k] != 1 {
       let whole = begin[k] == 0 && step[k] == 1 && out[k] == shape[k]
-      if merge, whole, let last = groups.last, last.whole {
+      if merge, !minimal, whole, let last = groups.last, last.whole {
         groups[groups.count - 1].axes.append(k)
       } else {
         groups.append((whole, [k]))
+      }
+    }
+    if merge && minimal {
+      while groups.count > gpuRank {
+        let pairs = groups.indices.dropLast().filter { groups[$0].whole && groups[$0 + 1].whole }
+        guard let k = pairs.min(by: { a, b in
+          groups[a].axes.reduce(1) { $0 * shape[$1] } * groups[a + 1].axes.reduce(1) { $0 * shape[$1] }
+            < groups[b].axes.reduce(1) { $0 * shape[$1] } * groups[b + 1].axes.reduce(1) { $0 * shape[$1] }
+        })
+        else { return nil }
+        groups[k].axes += groups[k + 1].axes
+        groups.remove(at: k + 1)
       }
     }
     guard groups.count < shape.count else { return nil }

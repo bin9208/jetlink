@@ -80,17 +80,19 @@ public enum LiteRTPreparation {
   /// `keepFraction` (a diagnostic) keeps the first part of the converted
   /// graph's operators, the weights' DEQUANTIZEs aside, with every tensor
   /// the part makes that the rest reads as an output: for timing a model a
-  /// part at a time on an accelerator.
+  /// part at a time on an accelerator. `keepOperators` keeps that many
+  /// instead.
   public static func prepare(
-    source: URL, into directory: URL, forNPU: Bool = false, int8Weights: Bool = false, keepFraction: Double? = nil
+    source: URL, into directory: URL, forNPU: Bool = false, int8Weights: Bool = false, keepFraction: Double? = nil,
+    keepOperators: Int? = nil
   ) throws -> Report {
     let data = try Data(contentsOf: source, options: .alwaysMapped)
     return try data.withUnsafeBytes { buf in
-      try prepare(Source(bytes: buf), into: directory, forNPU: forNPU, int8Weights: int8Weights, keepFraction: keepFraction)
+      try prepare(Source(bytes: buf), into: directory, forNPU: forNPU, int8Weights: int8Weights, keepFraction: keepFraction, keepOperators: keepOperators)
     }
   }
 
-  private static func prepare(_ src: Source, into directory: URL, forNPU: Bool, int8Weights: Bool, keepFraction: Double?) throws -> Report {
+  private static func prepare(_ src: Source, into directory: URL, forNPU: Bool, int8Weights: Bool, keepFraction: Double?, keepOperators: Int?) throws -> Report {
     var (model, g) = try Decode.preparable(src)
     let stripped = try Patches.stripTinygradOps(&g, &model.opsets)
     guard let opset = model.opsets.first(where: { $0.domain.isEmpty || $0.domain == "ai.onnx" })?.version else {
@@ -110,7 +112,11 @@ public enum LiteRTPreparation {
       moved += m
       if r + f + m == 0 { break }
     }
-    if let keepFraction, keepFraction < 1 { cut(&lowered, keeping: keepFraction) }
+    if let keepOperators {
+      cut(&lowered, operators: keepOperators)
+    } else if let keepFraction, keepFraction < 1 {
+      cut(&lowered, keeping: keepFraction)
+    }
     let (tflite, buffers) = TFLiteOptimizer.compact(lowered)
 
     // The flatbuffer is written with every weight's offset 0, then each
@@ -159,7 +165,14 @@ public enum LiteRTPreparation {
   static func cut(_ l: inout LiteRTLowering, keeping fraction: Double) {
     let ops = l.model.operators
     let lead = ops.prefix { $0.op == .dequantize }.count
-    let n = lead + Int((Double(ops.count - lead) * fraction).rounded())
+    cut(&l, operators: Int((Double(ops.count - lead) * fraction).rounded()))
+  }
+
+  /// `cut(_:keeping:)` by a count of operators after the DEQUANTIZEs.
+  static func cut(_ l: inout LiteRTLowering, operators count: Int) {
+    let ops = l.model.operators
+    let lead = ops.prefix { $0.op == .dequantize }.count
+    let n = min(lead + max(count, 1), ops.count)
     let kept = ops[..<n]
     // what the kept operators compute, the weights' DEQUANTIZEs not: a
     // weight a dropped operator reads is no output, it goes with it

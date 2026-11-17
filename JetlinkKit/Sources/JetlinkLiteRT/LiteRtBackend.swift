@@ -86,8 +86,9 @@ public final class LiteRtBackend: EngineBackend {
   /// FLOAT32 (the APU cannot CAST them, and a CAST on the GPU beside it
   /// failed the compiled model). 6, the GPU's: the NPU's rewrites are the
   /// NPU's alone, and the GPU's conversion is carrot.7's again. The NPU's
-  /// stays 5, so its 10-minute compile on a MediaTek is kept.
-  static func conversionVersion(_ profile: LiteRtProfile) -> Int { profile == .npu ? 5 : 6 }
+  /// stays 5, so its 10-minute compile on a MediaTek is kept. The NPU's 6:
+  /// rank-5 views merge as few axes as it takes (sliceView's minimal).
+  static func conversionVersion(_ profile: LiteRtProfile) -> Int { 6 }
 
   /// How the NPU's compile is set up, kept with an artifact built for the
   /// NPU's profile. 1: LiteRT sees only the phone's vendor's compiler plugin

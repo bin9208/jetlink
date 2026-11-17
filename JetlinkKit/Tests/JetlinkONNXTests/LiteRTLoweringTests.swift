@@ -89,6 +89,39 @@ import Testing
     #expect(try Self.run(npu, ["h": [-2, 0.5, 1, 3], "img": [0, 1, 2, 255]])["o"]! == [0, 1.5, 3, 258])
   }
 
+  /// Light Speed 2's image queue in small: a rank-5 queue sliced along its
+  /// frames, a new frame concatenated, the first batch row taken. For the
+  /// NPU the views merge as few axes as it takes (no axis longer than a
+  /// merged pair), and compute what the GPU's do.
+  @Test func rankFiveQueueViewsStaySmallForTheNPU() throws {
+    var g = OnnxGraphBuilder()
+    g.input("q", Self.f32, [2, 5, 6, 4, 8])
+    g.input("new", Self.f32, [2, 1, 6, 4, 8])
+    g.int64("s1", [1])
+    g.int64("e5", [5])
+    g.int64("ax1", [1])
+    g.int64("s0", [0])
+    g.int64("e1", [1])
+    g.int64("ax0", [0])
+    g.node("Slice", ["q", "s1", "e5", "ax1"], ["kept"])
+    g.node("Concat", ["kept", "new"], ["next"], [.int("axis", 1)])
+    g.node("Slice", ["next", "s0", "e1", "ax0"], ["first"])
+    g.output("next", Self.f32, [2, 5, 6, 4, 8])
+    g.output("first", Self.f32, [1, 5, 6, 4, 8])
+    let gpu = try g.convert().file
+    let npu = try g.convert(forNPU: true).file
+    let longest = npu.tensors.filter { $0.buffer == 0 }.map { $0.shape.max() ?? 0 }.max()!
+    // the graph's own 4-D edge view [2, 30, 4, 8] is the longest; the GPU's
+    // views run to 6 * 4 * 8 and more
+    #expect(longest <= 5 * 6)
+    #expect(gpu.tensors.filter { $0.buffer == 0 }.map { $0.shape.max() ?? 0 }.max()! > longest)
+    var v = SeededValues(seed: 31)
+    let inputs = ["q": v(2 * 5 * 6 * 4 * 8), "new": v(2 * 6 * 4 * 8)]
+    let a = try Self.run(gpu, inputs)
+    let b = try Self.run(npu, inputs)
+    #expect(a["next"]! == b["next"]! && a["first"]! == b["first"]!)
+  }
+
   /// A stateful graph's image queue for an NPU: the uint8 queue comes in and
   /// goes back out, through a Cast to uint8, all FLOAT32 with no CAST.
   @Test func anImageQueueStaysFloatForTheNPU() throws {
