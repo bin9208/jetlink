@@ -102,12 +102,17 @@ public protocol EngineBackend: AnyObject, Sendable {
   /// (`OrtBackend.probeAgainstReference`): lines for the log, none when the
   /// backend cannot.
   func probeAgainstReference(model: URL, directory: URL, progress: @escaping (String) -> Void) -> [String]
+  /// Where the accelerator's time goes in the model, by QNN's own profile
+  /// (`OrtBackend.profileOnAccelerator`): lines for the log, none when the
+  /// backend cannot.
+  func profileOnAccelerator(model: URL, directory: URL, progress: @escaping (String) -> Void) -> [String]
 }
 
 extension EngineBackend {
   public func afterBenchmark(model: URL?, directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
   public func referenceBackend() -> (any EngineBackend)? { nil }
   public func probeAgainstReference(model: URL, directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
+  public func profileOnAccelerator(model: URL, directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
 }
 
 extension Engine {

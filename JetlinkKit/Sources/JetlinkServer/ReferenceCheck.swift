@@ -170,6 +170,9 @@ extension EngineHost {
         for line in lines { log.info("benchmark: \(line)") }
         lines = backend.probeAgainstReference(model: model, directory: directory, progress: progress)
       }
+      // where the accelerator's time goes, whatever the comparison said
+      for line in lines { log.info("benchmark: \(line)") }
+      lines = backend.profileOnAccelerator(model: model, directory: directory, progress: progress)
       return lines
     } catch {
       lock.lock()
