@@ -143,8 +143,9 @@ data class SettingsValues(
 )
 
 /** The test app's NPU experiments: id, title, what it does. */
-val NPU_EXPERIMENTS = listOf(
-    Triple("int8", "Int8 Weights", "Big weights stored as int8 (half the bytes), widened on the NPU."),
+val NPU_EXPERIMENTS = listOf<Triple<String, String, String>>(
+    // int8 weights (carrot.41-test): N16 583 ms a run on a Galaxy Tab S9, QNN
+    // leaving the widened MatMuls to the CPU, and further from the CPU's. Dropped.
 )
 
 class Settings(context: Context) {

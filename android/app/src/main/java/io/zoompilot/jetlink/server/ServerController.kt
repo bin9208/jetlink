@@ -94,8 +94,8 @@ class ServerController(private val context: Context, private val scope: Coroutin
         // the test app's NPU experiments, and every combination compared after a benchmark
         val testApp = io.zoompilot.jetlink.BuildConfig.CHANNEL == "test"
         put("experiments", kotlinx.serialization.json.JsonArray(
-            (if (testApp) settings.experiments.sorted() else emptyList()).map { kotlinx.serialization.json.JsonPrimitive(it) }))
-        put("experiment_sweep", testApp)
+            (if (testApp) settings.experiments.filter { id -> io.zoompilot.jetlink.settings.NPU_EXPERIMENTS.any { it.first == id } }.sorted() else emptyList()).map { kotlinx.serialization.json.JsonPrimitive(it) }))
+        put("experiment_sweep", testApp && io.zoompilot.jetlink.settings.NPU_EXPERIMENTS.isNotEmpty())
         put("port", settings.port)
         // Bench tools reach the server over Wi-Fi or `adb forward`; the comma
         // comes over USB.
