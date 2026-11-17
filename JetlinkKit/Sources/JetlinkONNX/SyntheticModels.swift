@@ -15,8 +15,17 @@ public enum SyntheticModels {
     graph.inputs = [.tensor("x", DataType.float, [1, Int64(rows), w])]
     graph.outputs = [.tensor("y", DataType.float, [1, Int64(rows), w])]
     // One weight's and one bias's bytes, shared by every layer's initializer
-    // (copy on write): the file holds a copy each, memory one.
-    let weight = Elements.encode((0..<(width * width)).map { Float(($0 * 7919) % 2001 - 1000) * 2e-5 }, as: DataType.float16)
+    // (copy on write): the file holds a copy each, memory one. The weight is
+    // pseudo-random, as a trained one looks: MediaTek's compiler shrank an
+    // earlier repeating pattern eightfold, which a real weight does not let it.
+    var state: UInt64 = 0x9E37_79B9_7F4A_7C15
+    let weight = Elements.encode(
+      (0..<(width * width)).map { _ -> Float in
+        state ^= state << 13
+        state ^= state >> 7
+        state ^= state << 17
+        return Float(Int64(state % 2001) - 1000) * 2e-5
+      }, as: DataType.float16)
     let bias = Elements.encode((0..<width).map { Float($0 % 17) * 1e-3 }, as: DataType.float16)
     var x = "x"
     for i in 0..<layers {

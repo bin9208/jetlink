@@ -148,8 +148,9 @@ import Testing
     let npu = try Self.convert(onnx, forNPU: true).file
     #expect(gpu.count("BATCH_MATMUL") == layers && npu.count("FULLY_CONNECTED") == layers && gpu.count("GELU") == layers - 1)
     let x = (0..<(rows * width)).map { Float($0 % 5) - 2 }
-    // the writer's fp16 values, as plain floats
-    let w = (0..<(width * width)).map { Float(Float16(Float(($0 * 7919) % 2001 - 1000) * 2e-5)) }
+    // the writer's fp16 values, as plain floats, from the file
+    let w = try Self.initializer(onnx, "w0")
+    #expect(w.count == width * width && Set(w).count > width)
     let b = (0..<width).map { Float(Float16(Float($0 % 17) * 1e-3)) }
     var h = x
     for i in 0..<layers {

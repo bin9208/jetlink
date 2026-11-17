@@ -7,71 +7,68 @@ import JetlinkServer
 /// within the comma's 50 ms there.
 ///
 /// On the Galaxy Tab S10+ (MT6989) carrot.18 brought Light Speed 2 on the
-/// APU from 2051 ms to 157 (the image queue's views, kept small), the GPU
-/// runs it at 94, and both read fp16 weights at only about 10 to 13 GB/s
-/// (768 MB of linear layers: 77 ms on the APU, 57 on the GPU): Light Speed
-/// 2's 734 MB cannot get under 50 ms at fp16 on either. int8 weights halve
-/// the bytes; the APU ran them slower than fp16, but LiteRT's GPU keeps an
-/// int8 weight int8 for its language models. So this sweep times, on the
-/// GPU, 768 MB of fp16 linear layers against the same in int8, and the
-/// benchmarked model with fp16 and with int8 weights, and says how far the
-/// int8 model's outputs are from the fp16 one's.
+/// APU to 157 ms (the image queue's views kept small), 126 of them its
+/// body's 718 MB of weights: about 6 GB/s, where a Snapdragon 8 Elite's NPU
+/// streams N16's 814 MB in 25 ms. (The linear layers of earlier sweeps
+/// looked faster because their repeating weights compressed eightfold on
+/// the APU.) LiteRT compiles for the APU with no options of NeuroPilot's,
+/// whose compiler knows --num-mdla (the cores to spread over), --opt and
+/// --fc-to-conv, and reads them from MTKNN_ADAPTER_COMPILER_OPTIONS: on the
+/// PC, --num-mdla=2 changed the compiled model and a made-up option did not.
+///
+/// So this sweep compiles the benchmarked model for the APU under each of
+/// those, and times it; and, on the GPU, times it with fp16 and with int8
+/// weights (half the bytes, if LiteRT's GPU keeps them int8) and says how
+/// far the int8 one's outputs are. Each NPU line says how big the compiled
+/// model came out, which tells whether the options reached the compiler.
 extension LiteRtBackend {
   struct SweepCase {
-    enum Kind {
-      case linear(layers: Int)
-      case model(URL)
-    }
-
-    let kind: Kind
+    let name: String
+    let npu: Bool
     let int8: Bool
-
-    var name: String {
-      let weights = int8 ? "int8" : "fp16"
-      switch kind {
-      case .linear(let layers):
-        return "GPU linear \(weights) \((layers * LiteRtBackend.sweepWidth * LiteRtBackend.sweepWidth * (int8 ? 1 : 2)) >> 20) MB"
-      case .model(let url):
-        return "GPU \(url.deletingPathExtension().lastPathComponent.prefix(16)) \(weights) weights"
-      }
-    }
-
-    var slug: String {
-      switch kind {
-      case .linear(let layers): "linear\(layers)-\(int8)"
-      case .model: "model-\(int8)"
-      }
-    }
+    /// MTKNN_ADAPTER_COMPILER_OPTIONS for the NPU's compile
+    var options: String? = nil
+    /// MTKNN_MDLA_ENABLE_MULTI_CORE=1 for the compile and the runs
+    var multiCore = false
+    var tuned = false
   }
 
-  static let sweepWidth = 2048
-  static let sweepRows = 128
-  static let sweepRuns = 10
+  static let sweepRuns = 5
+
+  static let sweepCases: [SweepCase] = [
+    SweepCase(name: "NPU default", npu: true, int8: false),
+    SweepCase(name: "NPU --num-mdla=2", npu: true, int8: false, options: "--num-mdla=2"),
+    SweepCase(name: "NPU --opt=3", npu: true, int8: false, options: "--opt=3"),
+    SweepCase(name: "NPU --fc-to-conv", npu: true, int8: false, options: "--fc-to-conv"),
+    SweepCase(name: "NPU --num-mdla=2 --opt=3 --fc-to-conv", npu: true, int8: false, options: "--num-mdla=2 --opt=3 --fc-to-conv"),
+    SweepCase(name: "NPU the same, turbo", npu: true, int8: false, options: "--num-mdla=2 --opt=3 --fc-to-conv", tuned: true),
+    SweepCase(name: "NPU the same, multi-core", npu: true, int8: false, options: "--num-mdla=2 --opt=3 --fc-to-conv", multiCore: true),
+    SweepCase(name: "GPU fp16", npu: false, int8: false),
+    SweepCase(name: "GPU int8", npu: false, int8: true),
+  ]
 
   public func afterBenchmark(model: URL?, directory: URL, progress: @escaping (String) -> Void) -> [String] {
     #if os(Android)
-      guard LiteRtRuntime.npuVendor == .mediaTek else { return [] }
-      var cases = [SweepCase(kind: .linear(layers: 96), int8: false), SweepCase(kind: .linear(layers: 96), int8: true)]
-      if let model { cases += [SweepCase(kind: .model(model), int8: false), SweepCase(kind: .model(model), int8: true)] }
-      var lines = ["NPU sweep: \(cases.count) cases on the GPU: fp16 against int8 weights, linear layers and the model"]
-      var reference: [Float]?
+      guard LiteRtRuntime.npuVendor == .mediaTek, let model else { return [] }
+      let cases = Self.sweepCases
+      var lines = ["NPU sweep: \(model.lastPathComponent) under \(cases.count) settings: NeuroPilot's options on the APU, int8 weights on the GPU"]
+      var gpuReference: [Float]?
       for (index, sweep) in cases.enumerated() {
         progress("NPU sweep \(index + 1)/\(cases.count): \(sweep.name)")
         log.info("NPU sweep: starting \(sweep.name)")
         var line: String
-        switch runSweepCase(sweep, in: directory) {
+        switch runSweepCase(sweep, model: model, in: directory) {
         case .success(let result):
           line = "\(sweep.name): \(result.line)"
-          if case .model = sweep.kind {
-            if let reference, let out = result.output, out.count == reference.count {
+          if !sweep.npu {
+            if let reference = gpuReference, let out = result.output, out.count == reference.count {
               // the int8 model's driving output against the fp16 one's, on the same zeros
               let diffs = zip(out, reference).map { abs($0 - $1) }
-              let scale = reference.map(abs).max() ?? 0
               line += String(
                 format: "; against fp16: max |d| %.4f, mean |d| %.5f (fp16 outputs up to %.3f)", diffs.max() ?? 0,
-                diffs.reduce(0, +) / Float(max(diffs.count, 1)), scale)
+                diffs.reduce(0, +) / Float(max(diffs.count, 1)), reference.map(abs).max() ?? 0)
             } else if !sweep.int8 {
-              reference = result.output
+              gpuReference = result.output
             }
           }
         case .failure(let error):
@@ -89,32 +86,33 @@ extension LiteRtBackend {
 
   struct SweepResult {
     let line: String
-    /// The driving output of the last run, as floats; nil for a model without one.
+    /// The driving output of the last run, as floats.
     let output: [Float]?
   }
 
-  /// One case converted for the GPU, compiled and run on zeros.
-  func runSweepCase(_ sweep: SweepCase, in directory: URL) -> Result<SweepResult, Error> {
+  /// The model converted for the case's device, compiled under its settings
+  /// and run on zeros.
+  func runSweepCase(_ sweep: SweepCase, model: URL, in directory: URL) -> Result<SweepResult, Error> {
     let fm = FileManager.default
-    let work = directory.appending(path: sweep.slug, directoryHint: .isDirectory)
+    let work = directory.appending(path: "case", directoryHint: .isDirectory)
     defer { try? fm.removeItem(at: work) }
+    let environment = [
+      ("MTKNN_ADAPTER_COMPILER_OPTIONS", sweep.options), ("MTKNN_MDLA_ENABLE_MULTI_CORE", sweep.multiCore ? "1" : nil),
+    ]
+    for (name, value) in environment {
+      if let value { setenv(name, value, 1) } else { unsetenv(name) }
+    }
+    defer { for (name, _) in environment { unsetenv(name) } }
     do {
       try? fm.removeItem(at: work)
-      try fm.createDirectory(at: work, withIntermediateDirectories: true)
+      let compiled = work.appending(path: LiteRtArtifact.npuCache, directoryHint: .isDirectory)
+      try fm.createDirectory(at: compiled, withIntermediateDirectories: true)
       let convertStarted = Date()
-      let converted: LiteRTPreparation.Report
-      switch sweep.kind {
-      case .linear(let layers):
-        let onnx = work.appending(path: "model.onnx")
-        try SyntheticModels.writeLinearStack(layers: layers, width: Self.sweepWidth, rows: Self.sweepRows, to: onnx)
-        converted = try LiteRTPreparation.prepare(source: onnx, into: work, int8Weights: sweep.int8)
-        try? fm.removeItem(at: onnx)
-      case .model(let onnx):
-        converted = try LiteRTPreparation.prepare(source: onnx, into: work, int8Weights: sweep.int8)
-      }
+      let converted = try LiteRTPreparation.prepare(source: model, into: work, forNPU: sweep.npu, int8Weights: sweep.int8)
       let convertSeconds = Date().timeIntervalSince(convertStarted)
       let compileStarted = Date()
-      let engine = try LiteRtEngine(model: converted.url, options: .gpu(cache: nil), device: "sweep", label: { $0.name })
+      let options: LiteRtCompileOptions = sweep.npu ? .npu(compiled: compiled, gpu: nil, tuned: sweep.tuned) : .gpu(cache: nil)
+      let engine = try LiteRtEngine(model: converted.url, options: options, device: "sweep", label: { $0.name })
       defer { engine.close() }
       let compileSeconds = Date().timeIntervalSince(compileStarted)
       try engine.run()
@@ -135,10 +133,12 @@ extension LiteRtBackend {
       }
       let finite = output?.allSatisfy(\.isFinite) ?? true
       func median(_ v: [Double]) -> String { String(format: "%.1f", v.sorted()[v.count / 2]) }
-      let line = "\(converted.operators.values.reduce(0, +)) ops, \(Files.size(of: converted.url) >> 20) MB, on \(engine.hardware.name)"
-        + "\(engine.fullyAccelerated ? "" : " (not every op)"), convert \(String(format: "%.0f", convertSeconds)) s, "
-        + "compile \(String(format: "%.0f", compileSeconds)) s, \(runs.count) runs ms median \(median(runs))"
-        + " min \(String(format: "%.1f", runs.min()!)) max \(String(format: "%.1f", runs.max()!))" + (finite ? "" : ", outputs NOT finite")
+      // what LiteRT kept of the NPU's compile: its size changes with the options that reached the compiler
+      let compiledBytes = sweep.npu ? ", compiled \(Files.size(of: compiled)) bytes" : ""
+      let line = "\(Files.size(of: converted.url) >> 20) MB, on \(engine.hardware.name)\(engine.fullyAccelerated ? "" : " (not every op)")"
+        + ", convert \(String(format: "%.0f", convertSeconds)) s, compile \(String(format: "%.0f", compileSeconds)) s\(compiledBytes), "
+        + "\(runs.count) runs ms median \(median(runs)) min \(String(format: "%.1f", runs.min()!)) max \(String(format: "%.1f", runs.max()!))"
+        + (finite ? "" : ", outputs NOT finite")
       return .success(SweepResult(line: line, output: output))
     } catch {
       return .failure(error)
