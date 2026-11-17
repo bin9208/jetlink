@@ -79,13 +79,13 @@ public enum OrtProfile: String, CaseIterable, Sendable {
   /// on both, 6 the plain graph, 7 the whole graph for the Neural Engine or
   /// the Hexagon NPU with finite attention masks, 8 that with constant
   /// attention masks as an added fp16 bias, 9 the Hexagon NPU's with the
-  /// vision norms prescaled too. An artifact prepared under
+  /// vision norms prescaled too, 10 with every norm in fp16-safe form. An artifact prepared under
   /// another rebuilds.
   public var prepareVersion: Int {
     switch layout {
     case .plain: 6
     case .aneWhole: 8
-    case .hexagonWhole: 9
+    case .hexagonWhole: 10
     case .split, .whole: 5
     }
   }

@@ -107,3 +107,26 @@ import Testing
     #expect(try Patches.prescaleVisionLayerNorm(&g) == 0)
   }
 }
+
+@Suite struct SafeLayerNormTests {
+  @Test func everyNormBecomesItsFp16SafeFormAndKeepsItsOutput() throws {
+    var b = OnnxGraphBuilder(opset: 20)
+    b.input("x", DataType.float16, [1, 4, 8])
+    b.valueInfo("y", DataType.float16, [1, 4, 8])
+    b.fp16("w", [8], Array(repeating: 1, count: 8))
+    b.fp16("bias", [8], Array(repeating: 0, count: 8))
+    b.node("LayerNormalization", ["x", "w", "bias"], ["y"], [.floatValue("epsilon", 1e-5), .int("axis", -1)])
+    b.output("y", DataType.float16, [1, 4, 8])
+    var g = b.graph
+    #expect(Patches.safeLayerNorm(&g) == 1)
+    #expect(!g.nodes.contains { $0.op == "LayerNormalization" })
+    #expect(g.nodes.filter { $0.op == "ReduceMean" }.count == 2 && g.nodes.contains { $0.op == "ReduceMax" })
+    let last = try #require(g.nodes.last)
+    #expect(last.outputs == ["y"] && last.op == "Add" && last.displayName == Patches.safeLayerNormOutput("y"))
+    let axes = try #require(g.initializers.first { $0.key == "y__safe_axes" })
+    #expect(axes.dims == [1])
+    // a probe still sees it as a norm
+    let probed = Patches.addProbes(&g, .init(ops: ["LayerNormalization"]))
+    #expect(probed.map(\.op) == [] || probed.map(\.op) == ["LayerNormalization"])
+  }
+}

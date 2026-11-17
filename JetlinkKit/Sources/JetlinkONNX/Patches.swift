@@ -454,6 +454,102 @@ enum Patches {
     return done
   }
 
+  // MARK: safe_layernorm
+
+  /// Rewrites every LayerNormalization (opset 17+, one output) as
+  ///
+  ///     d = x - mean(x);  s = max(max|d|, 1e-2);  y = (d/s) / sqrt(mean((d/s)^2) + eps/s^2)
+  ///
+  /// then scale and bias: the fp16-safe form LiteRT's lowering gives a
+  /// MediaTek APU (LiteRTOps.layerNorm), here as ONNX nodes for the Hexagon
+  /// NPU. It is LayerNorm exactly in real arithmetic, and nothing in it
+  /// leaves fp16's range: the deviations are at most 1 before squaring and
+  /// their mean square at least 1/D.
+  ///
+  /// On a Snapdragon 8 Elite (HTP v79) carrot's N16 left the CPU by metres:
+  /// with its vision norms prescaled by 1/32 the probe still found the
+  /// policy's query and key norms (288 x 64, already prescaled by 1/8) 40%
+  /// off and the attention scores after them 30%. One fixed scale cannot
+  /// serve norms whose inputs reach 2000 and norms whose inputs are small;
+  /// this form needs none. Returns how many norms.
+  static func safeLayerNormOutput(_ y: String) -> String { "\(y)__safe_layernorm" }
+
+  static func safeLayerNorm(_ g: inout Graph) -> Int {
+    var new: [Node] = []
+    new.reserveCapacity(g.nodes.count * 2)
+    var added: [Tensor] = []
+    var done = 0
+    func half(_ name: String, _ value: Float) -> String {
+      let bits = Float16(value).bitPattern.littleEndian
+      added.append(
+        Tensor(name: name, dims: [], dataType: DataType.float16, raw: .owned([UInt8(truncatingIfNeeded: bits), UInt8(truncatingIfNeeded: bits >> 8)])))
+      return name
+    }
+    let floor = "__safe_layernorm_floor"
+    let one = "__safe_layernorm_one"
+    var constants = false
+    for node in g.nodes {
+      guard node.op == "LayerNormalization", node.inputs.count >= 2, node.outputs.count == 1 || node.outputs.dropFirst().allSatisfy(\.isEmpty)
+      else {
+        new.append(node)
+        continue
+      }
+      if !constants {
+        _ = half(floor, 1e-2)
+        _ = half(one, 1)
+        constants = true
+      }
+      let y = node.outputs[0]
+      let p = "\(y)__safe"
+      let axis = node.attribute("axis")?.i ?? -1
+      let epsilon = node.attribute("epsilon")?.f ?? 1e-5
+      // axes from `axis` to the last; a negative axis names them from the end
+      let axes = "\(p)_axes"
+      if axis < 0 {
+        var t = int64Tensor(Array(axis...(-1)), axes)
+        t.dims = [Int64(-axis)]
+        added.append(t)
+      } else {
+        // a non-negative axis needs the rank, which the norms of the driving
+        // models never use; leave such a norm as it is
+        new.append(node)
+        continue
+      }
+      let keep = [Attribute.int("keepdims", 1)]
+      func n(_ op: String, _ inputs: [String], _ out: String, _ attributes: [Attribute] = []) {
+        new.append(Node(inputs: inputs, outputs: [out], name: out, opType: op, attributes: attributes))
+      }
+      let x = node.inputs[0]
+      n("ReduceMean", [x, axes], "\(p)_mean", keep)
+      n("Sub", [x, "\(p)_mean"], "\(p)_d")
+      n("Abs", ["\(p)_d"], "\(p)_abs")
+      n("ReduceMax", ["\(p)_abs", axes], "\(p)_peak", keep)
+      n("Max", ["\(p)_peak", floor], "\(p)_s")
+      n("Div", [one, "\(p)_s"], "\(p)_r")
+      n("Mul", ["\(p)_d", "\(p)_r"], "\(p)_dn")
+      n("Mul", ["\(p)_dn", "\(p)_dn"], "\(p)_sq")
+      n("ReduceMean", ["\(p)_sq", axes], "\(p)_var", keep)
+      n("Mul", ["\(p)_r", "\(p)_r"], "\(p)_r2")
+      n("Mul", ["\(p)_r2", half("\(p)_eps", epsilon)], "\(p)_epsr")
+      n("Add", ["\(p)_var", "\(p)_epsr"], "\(p)_ve")
+      n("Sqrt", ["\(p)_ve"], "\(p)_std")
+      n("Div", ["\(p)_dn", "\(p)_std"], "\(p)_norm")
+      let hasBias = node.inputs.count > 2 && !node.inputs[2].isEmpty
+      n("Mul", ["\(p)_norm", node.inputs[1]], hasBias ? "\(p)_scaled" : y)
+      if hasBias {
+        n("Add", ["\(p)_scaled", node.inputs[2]], y)
+      }
+      // the norm's own output, which a probe looks for by this name
+      new[new.count - 1].name = safeLayerNormOutput(y)
+      done += 1
+    }
+    if done > 0 {
+      g.nodes = new
+      g.initializers.append(contentsOf: added)
+    }
+    return done
+  }
+
   // MARK: prescale_vision_layernorm
 
   /// How much `prescaleVisionLayerNorm` divides a vision norm's input by.
@@ -524,11 +620,13 @@ enum Patches {
     var candidates: [(name: String, op: String)] = []
     let wanted = request.names.map(Set.init)
     for n in g.nodes {
+      // a norm in its fp16-safe form is still a norm here
+      let op = n.outputs.count == 1 && n.displayName == safeLayerNormOutput(n.outputs[0]) ? "LayerNormalization" : n.op
       for out in n.outputs where info[out] != nil && !outputs.contains(out) {
         if let wanted {
-          if wanted.contains(out) { candidates.append((out, n.op)) }
-        } else if request.ops.contains(n.op) {
-          candidates.append((out, n.op))
+          if wanted.contains(out) { candidates.append((out, op)) }
+        } else if request.ops.contains(op) {
+          candidates.append((out, op))
         }
       }
     }
