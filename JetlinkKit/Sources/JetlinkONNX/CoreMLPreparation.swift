@@ -161,10 +161,10 @@ public enum CoreMLPreparation {
     var (model, g) = try Decode.preparable(src)
 
     let stripped = try Patches.stripTinygradOps(&g, &model.opsets)
-    // The Hexagon NPU takes the uint8 images as they are, half the bytes
-    // across each run (N16's image queue 3.9 MB each way as fp16), and casts
-    // them where the graph always did; CoreML has no uint8.
-    let retyped = Patches.needsPatch(g) && layout != .hexagonWhole
+    // Not for the Hexagon NPU either: kept uint8 there (carrot.38-test), the
+    // image queue's Slice, Concat and Gather left the NPU for the CPU, and
+    // N16 ran in 39.7 ms a frame instead of 33.5, further from the CPU's.
+    let retyped = Patches.needsPatch(g)
     if retyped {
       try Patches.patchUint8Inputs(&g)
     }

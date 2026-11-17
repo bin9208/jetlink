@@ -81,13 +81,15 @@ public enum OrtProfile: String, CaseIterable, Sendable {
   /// attention masks as an added fp16 bias, 9 the Hexagon NPU's with the
   /// vision norms prescaled too, 10 with every norm in fp16-safe form, 11 back to
   /// the prescaled native norms (12, with GELU in its tanh form, was slower
-  /// and was dropped), 13 with the state queues fp16 at the graph's edge, 14 with the images uint8 at the edge and their normalization folded. An artifact prepared under
+  /// and was dropped), 13 with the state queues fp16 at the graph's edge, 14 with the images uint8 at the edge and their normalization folded
+  /// (the uint8 images moved part of the graph to the CPU), 15 with the
+  /// normalization folded alone. An artifact prepared under
   /// another rebuilds.
   public var prepareVersion: Int {
     switch layout {
     case .plain: 6
     case .aneWhole: 8
-    case .hexagonWhole: 14
+    case .hexagonWhole: 15
     case .split, .whole: 5
     }
   }
