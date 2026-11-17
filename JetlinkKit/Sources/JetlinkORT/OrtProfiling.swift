@@ -40,23 +40,38 @@ extension OrtBackend {
         }
         let buffers = Buffers()
         let inputs = session.inputs.map { ($0, buffers.alloc($0)) }
-        let binding = try OrtBinding(session: session, inputs: inputs, outputs: session.outputs.map { ($0, buffers.alloc($0)) })
+        let outputs = session.outputs.map { ($0, buffers.alloc($0)) }
+        let binding = try OrtBinding(session: session, inputs: inputs, outputs: outputs)
         var seed: UInt64 = 0x9E37_79B9_7F4A_7C15
         let runs = 23
         for run in 0..<runs {
-          // changing camera bytes, as a drive gives
-          for (spec, p) in inputs where spec.name.contains("img") {
-            let bytes = p.assumingMemoryBound(to: UInt8.self)
-            for i in stride(from: run % 13, to: spec.byteCount, by: 13) {
+          // Valid pixel values even when the prepared input is float16:
+          // randomizing float bytes can introduce infinities and NaNs.
+          for (spec, p) in inputs where spec.name.contains("img") && !spec.name.hasPrefix("state_")
+          {
+            for i in 0..<spec.count {
               seed ^= seed << 13
               seed ^= seed >> 7
               seed ^= seed << 17
-              bytes[i] = UInt8(truncatingIfNeeded: seed >> 24)
+              let value = UInt8(truncatingIfNeeded: seed >> 24)
+              switch spec.type {
+              case .uint8: p.assumingMemoryBound(to: UInt8.self)[i] = value
+              case .float16: p.assumingMemoryBound(to: UInt16.self)[i] = Float16(value).bitPattern
+              case .float: p.assumingMemoryBound(to: Float.self)[i] = Float(value)
+              default: break
+              }
             }
           }
           let t = ProcessInfo.processInfo.systemUptime
           try binding.run()
           if run >= 3 { wall.append((ProcessInfo.processInfo.systemUptime - t) * 1000) }
+          for (spec, p) in inputs where spec.name.hasPrefix("state_") {
+            if let (next, q) = outputs.first(where: { $0.0.name == "next_" + spec.name }),
+              next.type == spec.type, next.byteCount == spec.byteCount
+            {
+              p.copyMemory(from: q, byteCount: spec.byteCount)
+            }
+          }
           progress("profile: run \(run + 1)/\(runs)")
         }
       }

@@ -72,6 +72,9 @@ public enum CoreMLPreparation {
   public enum Experiment: String, CaseIterable, Sendable, Comparable {
     /// Big weights as int8 with a DequantizeLinear (`int8Weights`).
     case int8
+    case w8a16Vision = "w8a16-vision"
+    case w8a16 = "w8a16"
+    case layouts
 
     public static func < (a: Experiment, b: Experiment) -> Bool { a.rawValue < b.rawValue }
 
@@ -80,9 +83,9 @@ public enum CoreMLPreparation {
       set.isEmpty ? "none" : set.sorted().map(\.rawValue).joined(separator: "+")
     }
 
-    /// Every combination, the empty one first.
+    /// Independent benchmark candidates, with the unchanged baseline first.
     public static var combinations: [Set<Experiment>] {
-      allCases.reduce([[]]) { sets, e in sets + sets.map { $0.union([e]) } }
+      [[], [.layouts], [.w8a16Vision], [.w8a16]]
     }
   }
 

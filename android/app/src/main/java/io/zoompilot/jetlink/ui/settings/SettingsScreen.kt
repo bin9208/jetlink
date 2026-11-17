@@ -321,10 +321,10 @@ private fun Performance(values: SettingsValues, info: SettingsInfo, actions: Set
         )
     }
     // the test app's: what the NPU model is built with; a benchmark compares every combination
-    if (io.zoompilot.jetlink.BuildConfig.CHANNEL == "test" && values.processor.resolved().usesQnn && NPU_EXPERIMENTS.isNotEmpty()) {
+    if (io.zoompilot.jetlink.BuildConfig.CHANNEL == "test" && values.processor.resolved() == Processor.Npu && NPU_EXPERIMENTS.isNotEmpty()) {
         FormSection(
-            "NPU Experiments (테스트)",
-            footer = { FormFooter("바꾸면 서버가 다시 시작되고 켠 것으로 주행 모델을 다시 만듭니다(처음 한 번 1~2분). 벤치마크 뒤에는 모든 조합을 따로 만들어 속도와 CPU 대비 정확도를 로그에 남깁니다(몇 분 걸림).") },
+            "NPU Experiments (벤치마크 전용)",
+            footer = { FormFooter("켠 후보를 벤치마크 뒤에 하나씩 비교합니다. 기본 모델은 유지됩니다. W8A16은 NPU 보정·컴파일로 몇 분 걸릴 수 있습니다. 지원되지 않아 CPU로 넘어가는 후보는 실패로 기록합니다. 속도·출력 차이·모델 크기는 Logs에서 확인하세요. 전력 모드·공유 메모리도 함께 비교합니다.") },
         ) {
             NPU_EXPERIMENTS.forEachIndexed { i, (id, title, about) ->
                 if (i > 0) RowDivider()

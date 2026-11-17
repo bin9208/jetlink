@@ -139,13 +139,14 @@ data class SettingsValues(
      * `CoreMLPreparation.Experiment`), what the driving model is built with;
      * each benchmark also compares every other combination.
      */
-    val experiments: Set<String> = emptySet(),
+    val experiments: Set<String> = setOf("layouts", "w8a16-vision", "w8a16"),
 )
 
 /** The test app's NPU experiments: id, title, what it does. */
 val NPU_EXPERIMENTS = listOf<Triple<String, String, String>>(
-    // int8 weights (carrot.41-test): N16 583 ms a run on a Galaxy Tab S9, QNN
-    // leaving the widened MatMuls to the CPU, and further from the CPU's. Dropped.
+    Triple("layouts", "Layout 최적화", "연속 Transpose 합치기·크기 1 축의 이동 제거. 벤치마크에서만 비교합니다."),
+    Triple("w8a16-vision", "영상부 W8A16", "영상부의 큰 Conv·FC 가중치 8비트, 활성값 16비트. NPU 합성 입력 보정 후 속도·출력 차이를 비교합니다."),
+    Triple("w8a16", "전체 큰 Conv·FC W8A16", "정책부까지 큰 상수 가중치 연산을 보정합니다. Attention·정규화·보호된 출력부는 유지합니다. 합성 보정으로 주행 정확도를 보장하지 않습니다."),
 )
 
 class Settings(context: Context) {
@@ -194,7 +195,7 @@ class Settings(context: Context) {
         private const val KEEP_CPU_AWAKE = "keepCpuAwake"
         private const val KEEP_SCREEN_ON = "keepScreenOn"
         private const val DEVELOPER = "developer"
-        private const val EXPERIMENTS = "npuExperiments"
+        private const val EXPERIMENTS = "npuBenchmarkCandidatesV1"
 
         /** Settings from before Automatic are version 1. */
         private const val CURRENT = 2

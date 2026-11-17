@@ -2,6 +2,7 @@ import Foundation
 import JetlinkKit
 import JetlinkTestSupport
 import Testing
+import JetlinkONNX
 
 @testable import JetlinkORT
 @testable import JetlinkServer
@@ -11,6 +12,16 @@ import Testing
 /// serves the golden frames in ServerTests.
 @Suite("onnxruntime backend", .serialized)
 struct OrtBackendTests {
+  @Test("Test app selection changes only the benchmark backends")
+  func candidatesAreBenchmarkOnly() {
+    let b = OrtBackend(profile: .htpWhole, preparer: ONNXPreparer(), experiments: [.w8a16, .layouts], offersExperiments: true)
+    #expect(b.experiments.isEmpty)
+    #expect(b.experimentBackends().map(\.name) == ["none", "layouts", "w8a16"])
+    #expect(!b.tag().contains(".x-"))
+    let stable = OrtBackend(profile: .htpWhole, preparer: ONNXPreparer())
+    #expect(stable.experimentBackends().isEmpty)
+  }
+
   @Test("Each profile's sessions and layout")
   func profiles() {
     #if os(Android)

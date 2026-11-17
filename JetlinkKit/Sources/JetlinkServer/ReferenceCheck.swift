@@ -1,4 +1,5 @@
 import Foundation
+import JetlinkRegistry
 
 /// After a benchmark on an accelerator: the same model on the CPU, fed the
 /// same frames, to show whether the accelerator computes the model right.
@@ -168,6 +169,7 @@ extension EngineHost {
       l.staging.reset()
       lock.unlock()
       let cpuMean = cpuMs.isEmpty ? 0 : cpuMs.reduce(0, +) / Double(cpuMs.count)
+      cpu.close()  // don't retain a second full model during candidate calibration
       var lines: [String] = []
       if let s = comparison.summary {
         lines.append(backend.experimentName.map { "\(s) (experiments: \($0))" } ?? s)
@@ -224,12 +226,21 @@ extension EngineHost {
       try? FileManager.default.removeItem(at: directory)
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
       progress("building (a few minutes)")
+      let candidateLog = ServerLog(category: "benchmark")
       try backend.build(
-        model: model, artifact: artifact, report: { _, _, _ in }, metaExtra: ["spec": spec.dictionary()])
+        model: model, artifact: artifact, report: { stage, _, message in
+          candidateLog.info("candidate \(name) \(stage): \(message)")
+        }, metaExtra: ["spec": spec.dictionary()])
       let buildSeconds = ProcessInfo.processInfo.systemUptime - started
+      let artifactBytes = Files.size(of: artifact)
       progress("loading")
       let engine = try backend.load(artifact: artifact) { _, _, _ in }
       defer { engine.close() }
+      let rss = (try? String(contentsOfFile: "/proc/self/status", encoding: .utf8))?
+        .split(whereSeparator: \.isNewline).first { $0.hasPrefix("VmRSS:") }?
+        .split(whereSeparator: \.isWhitespace).dropFirst().first.flatMap { Double($0) }.map {
+          $0 / 1024
+        }
       let staging = try Staging.forModel(spec, engine: engine)
       guard let io = engine.outputs[ModelConstants.drivingOutput] else { return "experiment \(name): no driving output" }
       let packed = [Float](repeating: 0, count: spec.packedCount)
@@ -259,13 +270,38 @@ extension EngineHost {
         progress("frame \(frame + 1)/\(frames.count)")
       }
       var ms: [Double] = []
-      for run in 0..<68 {
+      staging.reset()
+      for run in 0..<108 {
+        guard !frames.isEmpty else { throw HostError.failed("no benchmark frames") }
+        let warped = frames[run % frames.count]
+        try warped.withUnsafeBytes { w in
+          try packed.withUnsafeBytes { p in
+            try staging.stage(warped: w.baseAddress!, packed: p.baseAddress!)
+          }
+        }
         let t = ProcessInfo.processInfo.systemUptime
         try engine.run()
         if run >= 8 { ms.append((ProcessInfo.processInfo.systemUptime - t) * 1000) }
+        a.withUnsafeMutableBytes { o in
+          if io.type == .float16 {
+            Convert.f16ToF32(staging.layout.output!, o.baseAddress!, count: spec.outputCount)
+          } else {
+            o.baseAddress!.copyMemory(from: staging.layout.output!, byteCount: spec.outputCount * 4)
+          }
+        }
+        if a.withUnsafeBytes({ Convert.allFinite($0.baseAddress!, count: spec.outputCount) }) {
+          staging.keep(outputs: staging.layout.output!, type: io.type)
+        } else {
+          notFinite += 1
+        }
       }
       ms.sort()
-      var line = String(format: "experiment %@: run p50 %.2f p90 %.2f ms, built in %.0f s", name, ms[ms.count / 2], ms[ms.count * 9 / 10], buildSeconds)
+      var line = String(format:
+          "experiment %@: run p50 %.2f p95 %.2f p99 %.2f ms, artifact %.1f MB, built in %.0f s; 100 changing synthetic frames, USB excluded", name, ms[ms.count / 2], ms[ms.count * 95 / 100], ms[ms.count * 99 / 100],
+        Double(artifactBytes) / 1_000_000, buildSeconds)
+      if let rss {
+        line += String(format: "; loaded process RSS %.0f MiB (includes baseline)", rss)
+      }
       if notFinite > 0 { line += ", \(notFinite) frame(s) not finite" }
       if let s = comparison.summary { line += "; \(s)" }
       return line

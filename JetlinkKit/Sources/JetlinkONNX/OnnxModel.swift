@@ -42,7 +42,7 @@ enum DataType {
 }
 
 struct OpsetImport {
-  let raw: Range<Int>
+  let raw: Range<Int>?
   let domain: String
   /// 0 when the source writes none, as protobuf reads an absent int64.
   let version: Int64
@@ -704,7 +704,15 @@ enum Encode {
     extras.upTo(7, &out, src)
     if let g = m.graph { out.message(7, graph(g, src)) }
     extras.upTo(8, &out, src)
-    for o in m.opsets { out.source(o.raw, src) }
+    for o in m.opsets {
+      if let raw = o.raw { out.source(raw, src) }
+      else {
+        var entry = Encoded()
+        entry.stringField(1, o.domain)
+        entry.intField(2, o.version)
+        out.message(8, entry)
+      }
+    }
     extras.upTo(14, &out, src)
     for p in m.props { prop(p, &out, src) }
     extras.upTo(25, &out, src)

@@ -173,7 +173,10 @@ public final class OrtBackend: EngineBackend {
     tryNpuSharedMemory: Bool = false, experiments: Set<CoreMLPreparation.Experiment> = [], offersExperiments: Bool = false
   ) {
     self.tryNpuSharedMemory = tryNpuSharedMemory
-    self.experiments = profile == .htpWhole ? experiments : []
+    // UI switches select benchmark candidates. The serving engine remains
+    // the baseline; only the scratch backends below apply a candidate.
+    self.experiments = profile == .htpWhole && !offersExperiments ? experiments : []
+    self.benchmarkExperiments = experiments
     self.offersExperiments = offersExperiments && profile == .htpWhole
     self.profile = profile
     self.preparer = preparer
@@ -186,6 +189,7 @@ public final class OrtBackend: EngineBackend {
 
   /// Whether a benchmark sweeps the experiments (the test app's).
   private let offersExperiments: Bool
+  private let benchmarkExperiments: Set<CoreMLPreparation.Experiment>
 
   public func tag() -> String {
     let base = "\(name)\(sanitize(runtimeVersion)).\(deviceTag())"
@@ -198,7 +202,9 @@ public final class OrtBackend: EngineBackend {
 
   public func experimentBackends() -> [(name: String, backend: any EngineBackend)] {
     guard offersExperiments else { return [] }
-    return CoreMLPreparation.Experiment.combinations.filter { $0 != experiments }.map { set in
+    guard !benchmarkExperiments.isEmpty else { return [] }
+    return CoreMLPreparation.Experiment.combinations.filter { $0.isEmpty || !$0.isDisjoint(with: benchmarkExperiments)
+    }.map { set in
       (
         CoreMLPreparation.Experiment.name(set),
         OrtBackend(
@@ -278,6 +284,16 @@ public final class OrtBackend: EngineBackend {
         CoreMLPreparation.cacheKey(stem: artifact.deletingPathExtension().lastPathComponent, part: $0)
       }
       log.info("prepared \(model.lastPathComponent): \(prepared.summary)")
+      if experiments.contains(.w8a16) || experiments.contains(.w8a16Vision) {
+        try prepareW8A16(in: staged, visionOnly: experiments.contains(.w8a16Vision), report: report)
+      } else if experiments.contains(.layouts) {
+        let file = staged.appending(path: "model.onnx")
+        let rewritten = staged.appending(path: "layout.onnx")
+        let count = try LayoutPreparation.prepare(source: file, to: rewritten)
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.moveItem(at: rewritten, to: file)
+        log.info("benchmark candidate layouts: \(count) exact layout rewrite(s)")
+      }
       let sessions = profile.sessions
       guard prepared.parts.map(\.name) == sessions.map(\.name) else {
         throw HostError.failed("the preparation wrote \(prepared.parts.map(\.name)), expected \(sessions.map(\.name))")
@@ -332,13 +348,20 @@ public final class OrtBackend: EngineBackend {
     let context = staged.appending(path: "\(session)_ctx.onnx")
     report("compile", 0, "compiling \(session) for the NPU")
     try Ticker.during(interval: 2, Ticker.paced("compile", "compiling \(session) for the NPU", took: took, report: report)) {
-      let config = [
+      var config = [
         "ep.context_enable": "1",
         "ep.context_file_path": context.path,
         // the context binary in a file of its own beside the model, not base64 inside it
         "ep.context_embed_mode": "0",
       ]
-      _ = try OrtSession(model: source, provider: "QNN", options: providerOptions(.htp), config: config)
+      var options = providerOptions(.htp)
+      if !experiments.isEmpty {
+        // An unsupported candidate is reported as failed, never timed with
+        // heavy layers silently on the CPU (carrot.41's 583 ms regression).
+        config["session.disable_cpu_ep_fallback"] = "1"
+        options["offload_graph_io_quantization"] = "0"
+      }
+      _ = try OrtSession(model: source, provider: "QNN", options: options, config: config)
     }
     guard FileManager.default.fileExists(atPath: context.path) else {
       log.warning("onnxruntime wrote no EP context for \(session); each load will compile it again")
@@ -411,17 +434,20 @@ public final class OrtBackend: EngineBackend {
   // MARK: variants
 
   /// The loaded model's artifact under each way of running it this build
-  /// can choose without compiling again: NPU shared memory on or off, and
-  /// FastRPC's 100 us wake-up on or off. Each runs 8 frames to settle and
-  /// 60 timed, one at a time, beside the loaded engine. Lines for the log.
+  /// can choose without compiling again: performance modes and NPU shared
+  /// memory. Each runs 8 frames to settle and 100 timed, one at a time,
+  /// beside the loaded engine. Zero inputs; not a thermal or power readout.
   public func compareVariants(artifact: URL, progress: @escaping (String) -> Void) -> [String] {
     guard profile == .htpWhole else { return [] }
     guard let (manifest, _) = try? OrtArtifact.open(artifact, version: profile.prepareVersion, check: { _ in nil }) else {
       return ["variants: the artifact did not open"]
     }
-    var variants: [(name: String, shared: Bool, rpc: Bool)] = [("plain", false, false), ("rpc 100us", false, true)]
+    var variants: [(name: String, shared: Bool, mode: String?)] = [
+      ("plain", false, nil), ("sustained", false, "sustained_high_performance"),
+      ("high performance", false, "high_performance"),
+    ]
     if tryNpuSharedMemory {
-      variants += [("shared memory", true, false), ("shared memory + rpc 100us", true, true)]
+      variants += [("shared memory", true, nil)]
     }
     var results: [String] = []
     for (i, v) in variants.enumerated() {
@@ -429,7 +455,7 @@ public final class OrtBackend: EngineBackend {
       do {
         let plans = self.plans(artifact, manifest).map { plan -> SessionPlan in
           var options = plan.options
-          if v.rpc { options["rpc_control_latency"] = "100" }
+          if let mode = v.mode { options["htp_performance_mode"] = mode }
           if v.shared { options[OrtBackend.sharedMemoryOption] = "1" }
           return SessionPlan(
             model: plan.model, provider: plan.provider, options: options, threads: plan.threads, label: plan.label, usesGPU: plan.usesGPU,
@@ -438,14 +464,14 @@ public final class OrtBackend: EngineBackend {
         let engine = try OrtEngine(plans: plans, device: deviceTag(), keepAlive: keepAlive, keepCPUWarm: false, sharedMemory: v.shared)
         defer { engine.close() }
         var ms: [Double] = []
-        for run in 0..<68 {
+        for run in 0..<108 {
           let t = ProcessInfo.processInfo.systemUptime
           try engine.run()
           if run >= 8 { ms.append((ProcessInfo.processInfo.systemUptime - t) * 1000) }
         }
         ms.sort()
         let label = v.shared && !engine.usesSharedMemory ? "\(v.name) (shared memory unavailable)" : v.name
-        results.append(String(format: "%@ p50 %.2f p90 %.2f ms", label, ms[ms.count / 2], ms[ms.count * 9 / 10]))
+        results.append(String(format: "%@ p50 %.2f p95 %.2f p99 %.2f ms (zero inputs; USB excluded)", label, ms[ms.count / 2], ms[ms.count * 95 / 100], ms[ms.count * 99 / 100]))
       } catch {
         let reason = "\(error)".contains("remote_register_buf_attr2") ? "this phone's FastRPC cannot" : "\(error)".prefix(160).description
         results.append("\(v.name) unavailable (\(reason))")
