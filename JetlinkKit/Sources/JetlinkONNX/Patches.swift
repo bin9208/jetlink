@@ -550,6 +550,89 @@ enum Patches {
     return done
   }
 
+  // MARK: int8_weights
+
+  /// The weights of MatMul, Gemm and Conv with at least `minimum` elements as
+  /// int8, one scale per output channel (symmetric, zero point 0), read
+  /// through a DequantizeLinear to the type they had: a quarter of fp32's
+  /// bytes and half of fp16's for the NPU to read each run, if QNN runs them
+  /// so. Returns how many. Before the Gemm rewrite, which leaves its
+  /// weights transposed and unread until written.
+  static func int8Weights(_ g: inout Graph, _ src: Source, minimum: Int = 65_536) throws -> Int {
+    var inits: [String: Int] = [:]
+    for (i, t) in g.initializers.enumerated() { inits[t.key] = i }
+    var readers: [String: Int] = [:]
+    for n in g.nodes { for x in n.inputs { readers[x, default: 0] += 1 } }
+    var done: [String: String] = [:]
+    var added: [Tensor] = []
+    var dequant: [Node] = []
+    var replaced = Set<String>()
+    for (k, node) in g.nodes.enumerated() where ["MatMul", "Gemm", "Conv"].contains(node.op) && node.inputs.count >= 2 {
+      let name = node.inputs[1]
+      if let made = done[name] {
+        g.nodes[k].inputs[1] = made
+        continue
+      }
+      guard let i = inits[name] else { continue }
+      let t = g.initializers[i]
+      guard t.elementType == DataType.float16 || t.elementType == DataType.float, t.elementCount >= minimum, t.dims.count >= 2 else { continue }
+      if case .transposed = t.raw { continue }
+      if case .widened = t.raw { continue }
+      // the output channel's axis: B's columns, a Gemm's rows when transB, a Conv's first
+      let axis: Int
+      switch node.op {
+      case "MatMul":
+        guard t.dims.count == 2 else { continue }
+        axis = 1
+      case "Gemm": axis = (node.attribute("transB")?.i ?? 0) == 1 ? 0 : 1
+      default: axis = 0
+      }
+      let values = try Elements.floats(Elements.littleEndian(t, src), as: t.elementType, for: name)
+      let dims = t.dims.map(Int.init)
+      let channels = dims[axis]
+      let inner = dims[(axis + 1)...].reduce(1, *)
+      let outer = dims[..<axis].reduce(1, *)
+      var amax = [Float](repeating: 0, count: channels)
+      for o in 0..<outer {
+        for c in 0..<channels {
+          let base = (o * channels + c) * inner
+          for j in 0..<inner { amax[c] = max(amax[c], abs(values[base + j])) }
+        }
+      }
+      let scale = amax.map { $0 > 0 ? $0 / 127 : 1 }
+      var q = [UInt8](repeating: 0, count: values.count)
+      for o in 0..<outer {
+        for c in 0..<channels {
+          let base = (o * channels + c) * inner
+          let r = 1 / scale[c]
+          for j in 0..<inner {
+            let v = Int(max(-127, min(127, (values[base + j] * r).rounded())))
+            q[base + j] = UInt8(bitPattern: Int8(v))
+          }
+        }
+      }
+      let qName = "\(name)__int8"
+      let sName = "\(name)__int8_scale"
+      let zName = "\(name)__int8_zero"
+      let out = "\(name)__dequantized"
+      added.append(Tensor(name: qName, dims: t.dims, dataType: DataType.int8, raw: .owned(q)))
+      added.append(Tensor(name: sName, dims: [Int64(channels)], dataType: t.elementType, raw: .owned(Elements.encode(scale, as: t.elementType))))
+      added.append(Tensor(name: zName, dims: [Int64(channels)], dataType: DataType.int8, raw: .owned([UInt8](repeating: 0, count: channels))))
+      dequant.append(Node(inputs: [qName, sName, zName], outputs: [out], name: out, opType: "DequantizeLinear", attributes: [.int("axis", Int64(axis))]))
+      done[name] = out
+      g.nodes[k].inputs[1] = out
+      replaced.insert(name)
+    }
+    guard !done.isEmpty else { return 0 }
+    // the fp weights a rewritten node alone read go
+    var still = Set<String>()
+    for n in g.nodes { still.formUnion(n.inputs) }
+    g.initializers.removeAll { replaced.contains($0.key) && !still.contains($0.key) }
+    g.initializers.append(contentsOf: added)
+    g.nodes = dequant + g.nodes
+    return done.count
+  }
+
   // MARK: fold_input_normalization
 
   /// Folds `Div(Sub(x, mean), std)` into the convolution that alone reads it,

@@ -91,6 +91,11 @@ class ServerController(private val context: Context, private val scope: Coroutin
         // the test app tries the NPU's shared memory; the main app once a phone that has it has run it
         put("npu_shared_memory", io.zoompilot.jetlink.BuildConfig.CHANNEL == "test")
         put("keep_cpu_warm", settings.keepCpuAwake)
+        // the test app's NPU experiments, and every combination compared after a benchmark
+        val testApp = io.zoompilot.jetlink.BuildConfig.CHANNEL == "test"
+        put("experiments", kotlinx.serialization.json.JsonArray(
+            (if (testApp) settings.experiments.sorted() else emptyList()).map { kotlinx.serialization.json.JsonPrimitive(it) }))
+        put("experiment_sweep", testApp)
         put("port", settings.port)
         // Bench tools reach the server over Wi-Fi or `adb forward`; the comma
         // comes over USB.

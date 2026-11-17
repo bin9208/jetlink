@@ -134,6 +134,18 @@ data class SettingsValues(
      * emulator, with no USB host, starts with it on.
      */
     val developer: Boolean = false,
+    /**
+     * The test app's experiments for the Snapdragon NPU (JetlinkONNX's
+     * `CoreMLPreparation.Experiment`), what the driving model is built with;
+     * each benchmark also compares every other combination.
+     */
+    val experiments: Set<String> = setOf("fold"),
+)
+
+/** The test app's NPU experiments: id, title, what it does. */
+val NPU_EXPERIMENTS = listOf(
+    Triple("fold", "Fold Image Normalization", "The image normalization put into the first convolution's weights."),
+    Triple("int8", "Int8 Weights", "Big weights stored as int8 (half the bytes), widened on the NPU."),
 )
 
 class Settings(context: Context) {
@@ -150,6 +162,7 @@ class Settings(context: Context) {
             .putBoolean(KEEP_CPU_AWAKE, next.keepCpuAwake)
             .putBoolean(KEEP_SCREEN_ON, next.keepScreenOn)
             .putBoolean(DEVELOPER, next.developer)
+            .putStringSet(EXPERIMENTS, next.experiments)
             .apply()
         state.value = next
     }
@@ -167,6 +180,7 @@ class Settings(context: Context) {
             keepCpuAwake = prefs.getBoolean(KEEP_CPU_AWAKE, defaults.keepCpuAwake),
             keepScreenOn = prefs.getBoolean(KEEP_SCREEN_ON, defaults.keepScreenOn),
             developer = prefs.getBoolean(DEVELOPER, Chip.isEmulator),
+            experiments = prefs.getStringSet(EXPERIMENTS, null)?.toSet() ?: defaults.experiments,
         )
     }
 
@@ -178,6 +192,7 @@ class Settings(context: Context) {
         private const val KEEP_CPU_AWAKE = "keepCpuAwake"
         private const val KEEP_SCREEN_ON = "keepScreenOn"
         private const val DEVELOPER = "developer"
+        private const val EXPERIMENTS = "npuExperiments"
 
         /** Settings from before Automatic are version 1. */
         private const val CURRENT = 2

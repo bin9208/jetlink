@@ -83,13 +83,14 @@ public enum OrtProfile: String, CaseIterable, Sendable {
   /// the prescaled native norms (12, with GELU in its tanh form, was slower
   /// and was dropped), 13 with the state queues fp16 at the graph's edge, 14 with the images uint8 at the edge and their normalization folded
   /// (the uint8 images moved part of the graph to the CPU), 15 with the
-  /// normalization folded alone. An artifact prepared under
+  /// normalization folded alone, 16 with it and int8 weights the test app's
+  /// experiments (tagged in the artifact's name). An artifact prepared under
   /// another rebuilds.
   public var prepareVersion: Int {
     switch layout {
     case .plain: 6
     case .aneWhole: 8
-    case .hexagonWhole: 15
+    case .hexagonWhole: 16
     case .split, .whole: 5
     }
   }
@@ -162,12 +163,17 @@ public final class OrtBackend: EngineBackend {
   /// Whether a load tries QNN's HTP shared memory (`loadEngine`): the test
   /// app's, until a phone that has it has run it.
   public let tryNpuSharedMemory: Bool
+  /// What the preparation tries for the whole NPU (`CoreMLPreparation.Experiment`):
+  /// the test app's switches. Artifacts are tagged with them.
+  public let experiments: Set<CoreMLPreparation.Experiment>
 
   public init(
     profile: OrtProfile, preparer: any ModelPreparer, keepAlive: Bool = true, keepCPUWarm: Bool = true, chip: String? = nil,
-    tryNpuSharedMemory: Bool = false
+    tryNpuSharedMemory: Bool = false, experiments: Set<CoreMLPreparation.Experiment> = [], offersExperiments: Bool = false
   ) {
     self.tryNpuSharedMemory = tryNpuSharedMemory
+    self.experiments = profile == .htpWhole ? experiments : []
+    self.offersExperiments = offersExperiments && profile == .htpWhole
     self.profile = profile
     self.preparer = preparer
     self.keepAlive = keepAlive
@@ -177,11 +183,34 @@ public final class OrtBackend: EngineBackend {
 
   public var runtimeVersion: String { OrtRuntime.version }
 
+  /// Whether a benchmark sweeps the experiments (the test app's).
+  private let offersExperiments: Bool
+
+  public func tag() -> String {
+    let base = "\(name)\(sanitize(runtimeVersion)).\(deviceTag())"
+    return experiments.isEmpty ? base : "\(base).x-\(CoreMLPreparation.Experiment.name(experiments))"
+  }
+
+  public var experimentName: String? {
+    offersExperiments ? CoreMLPreparation.Experiment.name(experiments) : nil
+  }
+
+  public func experimentBackends() -> [(name: String, backend: any EngineBackend)] {
+    guard offersExperiments else { return [] }
+    return CoreMLPreparation.Experiment.combinations.filter { $0 != experiments }.map { set in
+      (
+        CoreMLPreparation.Experiment.name(set),
+        OrtBackend(
+          profile: profile, preparer: preparer, keepAlive: keepAlive, keepCPUWarm: false, chip: chip, experiments: set) as any EngineBackend
+      )
+    }
+  }
+
   /// onnxruntime on the CPU for the same chip: what a benchmark checks the
   /// NPU's or the GPU's results against.
   public func referenceBackend() -> (any EngineBackend)? {
     guard profile != .cpu, OrtProfile.available.contains(.cpu) else { return nil }
-    return OrtBackend(profile: .cpu, preparer: preparer, keepAlive: false, keepCPUWarm: false, chip: chip)
+    return OrtBackend(profile: .cpu, preparer: preparer.with(experiments: []), keepAlive: false, keepCPUWarm: false, chip: chip)
   }
 
   /// Carrot's auxiliary camera models: on QNN's GPU where this profile has
@@ -244,7 +273,7 @@ public final class OrtBackend: EngineBackend {
     try Artifact.build(artifact, metaExtra: metaExtra, report: report) { staged in
       try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: true)
       report("patch", 0, profile.usesCoreML ? "preparing the model for CoreML" : "preparing the model")
-      let prepared = try preparer.prepare(model: model, into: staged, layout: profile.layout) {
+      let prepared = try preparer.with(experiments: experiments).prepare(model: model, into: staged, layout: profile.layout) {
         CoreMLPreparation.cacheKey(stem: artifact.deletingPathExtension().lastPathComponent, part: $0)
       }
       log.info("prepared \(model.lastPathComponent): \(prepared.summary)")

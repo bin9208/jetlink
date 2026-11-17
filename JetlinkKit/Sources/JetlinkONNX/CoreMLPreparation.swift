@@ -67,6 +67,27 @@ public enum CoreMLPreparation {
     }
   }
 
+  /// What a test build may try on the Hexagon NPU beyond what it ships,
+  /// each measured against the rest (the test app's experiment sweep).
+  public enum Experiment: String, CaseIterable, Sendable, Comparable {
+    /// The image normalization folded into the stem (`foldInputNormalization`).
+    case fold
+    /// Big weights as int8 with a DequantizeLinear (`int8Weights`).
+    case int8
+
+    public static func < (a: Experiment, b: Experiment) -> Bool { a.rawValue < b.rawValue }
+
+    /// "fold+int8", or "none".
+    public static func name(_ set: Set<Experiment>) -> String {
+      set.isEmpty ? "none" : set.sorted().map(\.rawValue).joined(separator: "+")
+    }
+
+    /// Every combination, the empty one first.
+    public static var combinations: [Set<Experiment>] {
+      allCases.reduce([[]]) { sets, e in sets + sets.map { $0.union([e]) } }
+    }
+  }
+
   public struct Part: Sendable, Equatable {
     /// "vision", "policy" or "model"; the file is `<name>.onnx`.
     public let name: String
@@ -82,7 +103,7 @@ public enum CoreMLPreparation {
     public static func == (a: Report, b: Report) -> Bool {
       a.stripped == b.stripped && a.retypedImages == b.retypedImages && a.gathers == b.gathers && a.gemms == b.gemms
         && a.tiles == b.tiles && a.norms == b.norms && a.heads == b.heads && a.masks == b.masks && a.parts == b.parts
-        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.safeNorms == b.safeNorms && a.gelus == b.gelus && a.stateIO == b.stateIO && a.foldedNormalizations == b.foldedNormalizations && a.probes.map(\.name) == b.probes.map(\.name)
+        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.safeNorms == b.safeNorms && a.gelus == b.gelus && a.stateIO == b.stateIO && a.foldedNormalizations == b.foldedNormalizations && a.int8Weights == b.int8Weights && a.probes.map(\.name) == b.probes.map(\.name)
     }
     /// tinygrad layout ops bypassed.
     public let stripped: Int
@@ -119,6 +140,8 @@ public enum CoreMLPreparation {
     /// Image normalizations folded into the convolution after them
     /// (`foldInputNormalization`); 0 unless the layout is `.hexagonWhole`.
     public var foldedNormalizations: Int = 0
+    /// Weights made int8 (`int8Weights`); 0 unless asked for.
+    public var int8Weights: Int = 0
     /// The tensors made graph outputs for a probe, in graph order, with the
     /// op that writes each (`Patches.addProbes`); empty unless asked for.
     public var probes: [(name: String, op: String)] = []
@@ -144,11 +167,13 @@ public enum CoreMLPreparation {
     source: URL, into directory: URL, layout: Layout,
     cacheKey: (String) -> String,
     progress: ((Double) -> Void)? = nil,
-    probes: ProbeRequest? = nil
+    probes: ProbeRequest? = nil,
+    experiments: Set<Experiment> = []
   ) throws -> Report {
     let data = try Data(contentsOf: source, options: .alwaysMapped)
     return try data.withUnsafeBytes { buf in
-      try prepare(Source(bytes: buf), into: directory, layout: layout, cacheKey: cacheKey, progress: progress, probes: probes)
+      try prepare(
+        Source(bytes: buf), into: directory, layout: layout, cacheKey: cacheKey, progress: progress, probes: probes, experiments: experiments)
     }
   }
 
@@ -156,7 +181,8 @@ public enum CoreMLPreparation {
     _ src: Source, into directory: URL, layout: Layout,
     cacheKey: (String) -> String,
     progress: ((Double) -> Void)?,
-    probes probeRequest: ProbeRequest? = nil
+    probes probeRequest: ProbeRequest? = nil,
+    experiments: Set<Experiment> = []
   ) throws -> Report {
     var (model, g) = try Decode.preparable(src)
 
@@ -171,6 +197,17 @@ public enum CoreMLPreparation {
     var gathers = 0
     var gemms = 0
     var tiles = 0
+    var int8 = 0
+    var folded = 0
+    if layout == .hexagonWhole {
+      // the fold first, while the stem's weights are still an initializer
+      if experiments.contains(.fold) {
+        folded = try Patches.foldInputNormalization(&g, src)
+      }
+      if experiments.contains(.int8) {
+        int8 = try Patches.int8Weights(&g, src)
+      }
+    }
     if layout != .plain {
       gathers = try Patches.normalizeGatherIndices(&g, src)
       gemms = try Patches.gemmWithTransposedWeight(&g, src)
@@ -184,7 +221,6 @@ public enum CoreMLPreparation {
     var safeNorms = 0
     var gelus = 0
     var stateIO = 0
-    var folded = 0
     if layout == .aneWhole {
       norms = try Patches.prescaleLayerNorm(&g)
       heads = try Patches.headsInFP32(&g, src)
@@ -197,7 +233,6 @@ public enum CoreMLPreparation {
       heads = try Patches.headsInFP32(&g, src)
       visionNorms = try Patches.prescaleVisionLayerNorm(&g)
       stateIO = Patches.fp16StateIO(&g)
-      folded = try Patches.foldInputNormalization(&g, src)
       // Not Patches.tanhGelu: QNN runs the native Gelu well. On a Snapdragon
       // 8 Gen 2 the tanh form took Light Speed 2 from 84 M NPU cycles a run
       // to 168 M (33.4 ms to 39.3 ms a frame) and twice as far from the CPU.
@@ -235,6 +270,7 @@ public enum CoreMLPreparation {
     report.gelus = gelus
     report.stateIO = stateIO
     report.foldedNormalizations = folded
+    report.int8Weights = int8
     report.probes = probed
     return report
   }

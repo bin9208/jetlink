@@ -216,3 +216,38 @@ import Testing
     #expect(try Patches.foldInputNormalization(&g, none) == 0)
   }
 }
+
+@Suite struct Int8WeightsTests {
+  private let none = Source(bytes: UnsafeRawBufferPointer(start: nil, count: 0))
+
+  @Test func aMatMulsWeightsGoInt8WithAScalePerColumn() throws {
+    var b = OnnxGraphBuilder(opset: 20)
+    b.input("x", DataType.float16, [1, 2])
+    b.fp16("w", [2, 2], [1, -0.5, -2, 0.25])
+    b.node("MatMul", ["x", "w"], ["y"])
+    b.output("y", DataType.float16, [1, 2])
+    var g = b.graph
+    #expect(try Patches.int8Weights(&g, none, minimum: 1) == 1)
+    #expect(g.nodes.map(\.op) == ["DequantizeLinear", "MatMul"])
+    #expect(g.nodes[1].inputs[1] == g.nodes[0].outputs[0])
+    #expect(g.nodes[0].attribute("axis")?.i == 1)
+    #expect(!g.initializers.contains { $0.key == "w" })
+    let q = try #require(g.initializers.first { $0.key == "w__int8" })
+    let bytes = try Elements.littleEndian(q, none).map { Int8(bitPattern: $0) }
+    // columns' largest: 2 and 0.5, so scales 2/127 and 0.5/127
+    #expect(bytes == [64, -127, -127, 64])
+    let scale = try Elements.floats(Elements.littleEndian(try #require(g.initializers.first { $0.key == "w__int8_scale" }), none), as: DataType.float16, for: "s")
+    #expect(abs(scale[0] - 2 / 127) < 1e-4 && abs(scale[1] - 0.5 / 127) < 1e-4)
+  }
+
+  @Test func smallWeightsStay() throws {
+    var b = OnnxGraphBuilder(opset: 20)
+    b.input("x", DataType.float16, [1, 2])
+    b.fp16("w", [2, 2], [1, 2, 3, 4])
+    b.node("MatMul", ["x", "w"], ["y"])
+    b.output("y", DataType.float16, [1, 2])
+    var g = b.graph
+    #expect(try Patches.int8Weights(&g, none) == 0)
+    #expect(g.nodes.map(\.op) == ["MatMul"])
+  }
+}

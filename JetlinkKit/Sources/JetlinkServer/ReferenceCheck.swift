@@ -107,6 +107,10 @@ extension EngineHost {
       var a = [Float](repeating: 0, count: spec.outputCount)
       var c = [Float](repeating: 0, count: spec.outputCount)
       var cpuMs: [Double] = []
+      // kept for the experiment sweep, which compares against the same
+      var frames: [[UInt8]] = []
+      var cpuOutputs: [[Float]?] = []
+      let sweep = backend.experimentBackends()
 
       lock.lock()
       l.staging.reset()
@@ -154,6 +158,10 @@ extension EngineHost {
         if cFinite { cpuStaging.keep(outputs: cpuStaging.layout.output!, type: cpuIO.type) }
 
         if aFinite && cFinite { comparison.record(frame: frame, accelerator: a, cpu: c) }
+        if !sweep.isEmpty {
+          frames.append(warped)
+          cpuOutputs.append(cFinite ? c : nil)
+        }
         progress("CPU reference: frame \(frame + 1)/\(ReferenceComparison.frames)")
       }
       lock.lock()
@@ -161,7 +169,9 @@ extension EngineHost {
       lock.unlock()
       let cpuMean = cpuMs.isEmpty ? 0 : cpuMs.reduce(0, +) / Double(cpuMs.count)
       var lines: [String] = []
-      if let s = comparison.summary { lines.append(s) }
+      if let s = comparison.summary {
+        lines.append(backend.experimentName.map { "\(s) (experiments: \($0))" } ?? s)
+      }
       lines.append(
         String(
           format: "CPU reference %@: %.0f ms a frame, %.0f s in all", reference.deviceTag(), cpuMean,
@@ -178,12 +188,89 @@ extension EngineHost {
         for line in lines { log.info("benchmark: \(line)") }
         lines = backend.compareVariants(artifact: artifact, progress: progress)
       }
+      // and each other combination of the test build's experiments, built,
+      // fed the same frames and timed the same way, one after another
+      for (i, x) in sweep.enumerated() {
+        for line in lines { log.info("benchmark: \(line)") }
+        lines = [
+          experiment(
+            x.name, x.backend, model: model, spec: spec, sha256: l.sha256, frames: frames, cpu: cpuOutputs,
+            progress: { progress("experiments: \(i + 1)/\(sweep.count) \(x.name): \($0)") })
+        ]
+      }
       return lines
     } catch {
       lock.lock()
       if loaded === l { l.staging.reset() }
       lock.unlock()
       return ["accelerator against the CPU failed: \(error)"]
+    }
+  }
+}
+
+extension EngineHost {
+  /// One experiment set: built into a scratch directory, compared with the
+  /// CPU's outputs for the same frames, timed, and removed again.
+  func experiment(
+    _ name: String, _ backend: any EngineBackend, model: URL, spec: ModelSpec, sha256: String, frames: [[UInt8]], cpu: [[Float]?],
+    progress: @escaping (String) -> Void
+  ) -> String {
+    guard var comparison = ReferenceComparison(spec: spec) else { return "experiment \(name): no plan to compare" }
+    let started = ProcessInfo.processInfo.systemUptime
+    let directory = cache.layout.root.appending(path: "experiments", directoryHint: .isDirectory)
+    let artifact = directory.appending(path: "\(String(sha256.prefix(16))).\(backend.tag())\(backend.suffix)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    do {
+      try? FileManager.default.removeItem(at: directory)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      progress("building (a few minutes)")
+      try backend.build(
+        model: model, artifact: artifact, report: { _, _, _ in }, metaExtra: ["spec": spec.dictionary()])
+      let buildSeconds = ProcessInfo.processInfo.systemUptime - started
+      progress("loading")
+      let engine = try backend.load(artifact: artifact) { _, _, _ in }
+      defer { engine.close() }
+      let staging = try Staging.forModel(spec, engine: engine)
+      guard let io = engine.outputs[ModelConstants.drivingOutput] else { return "experiment \(name): no driving output" }
+      let packed = [Float](repeating: 0, count: spec.packedCount)
+      var a = [Float](repeating: 0, count: spec.outputCount)
+      var notFinite = 0
+      staging.reset()
+      for (frame, warped) in frames.enumerated() {
+        try warped.withUnsafeBytes { w in
+          try packed.withUnsafeBytes { p in try staging.stage(warped: w.baseAddress!, packed: p.baseAddress!) }
+        }
+        try engine.run()
+        let p = staging.layout.output!
+        a.withUnsafeMutableBytes { o in
+          if io.type == .float16 {
+            Convert.f16ToF32(p, o.baseAddress!, count: spec.outputCount)
+          } else {
+            o.baseAddress!.copyMemory(from: p, byteCount: spec.outputCount * 4)
+          }
+        }
+        let finite = a.withUnsafeBytes { Convert.allFinite($0.baseAddress!, count: spec.outputCount) }
+        if finite {
+          staging.keep(outputs: p, type: io.type)
+          if frame < cpu.count, let c = cpu[frame] { comparison.record(frame: frame, accelerator: a, cpu: c) }
+        } else {
+          notFinite += 1
+        }
+        progress("frame \(frame + 1)/\(frames.count)")
+      }
+      var ms: [Double] = []
+      for run in 0..<68 {
+        let t = ProcessInfo.processInfo.systemUptime
+        try engine.run()
+        if run >= 8 { ms.append((ProcessInfo.processInfo.systemUptime - t) * 1000) }
+      }
+      ms.sort()
+      var line = String(format: "experiment %@: run p50 %.2f p90 %.2f ms, built in %.0f s", name, ms[ms.count / 2], ms[ms.count * 9 / 10], buildSeconds)
+      if notFinite > 0 { line += ", \(notFinite) frame(s) not finite" }
+      if let s = comparison.summary { line += "; \(s)" }
+      return line
+    } catch {
+      return "experiment \(name) failed: \(String(describing: error).prefix(240))"
     }
   }
 }
