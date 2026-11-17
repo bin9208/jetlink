@@ -18,6 +18,11 @@ struct ReferenceComparison {
   private var dy: [Float] = [], dx: [Float] = [], dLanes: [Float] = [], dLead: [Float] = []
   private var worst = (frame: 0, dy: Float(0))
 
+  /// Whether the plan's end is far enough from the CPU's to look inside.
+  var wantsProbe: Bool {
+    !dy.isEmpty && dy.reduce(0, +) / Float(dy.count) > 0.3
+  }
+
   /// Nil for a model whose plan is not a single 33x15 hypothesis.
   init?(spec: ModelSpec) {
     guard let plan = spec.outputSlices.first(where: { $0.name == "plan" }), let start = plan.start, let stop = plan.stop,
@@ -63,7 +68,7 @@ extension EngineHost {
   /// Builds (once) and loads the model for the backend's CPU reference, runs
   /// both engines on the same changing frames, and returns lines for the log.
   /// Nothing when the backend has no reference or the model no plan to read.
-  func compareWithReference(_ l: Loaded, progress: (String) -> Void) -> [String] {
+  func compareWithReference(_ l: Loaded, progress: @escaping (String) -> Void) -> [String] {
     guard var comparison = ReferenceComparison(spec: l.spec), let reference = backend.referenceBackend() else { return [] }
     let spec = l.spec
     let started = ProcessInfo.processInfo.systemUptime
@@ -161,6 +166,10 @@ extension EngineHost {
         String(
           format: "CPU reference %@: %.0f ms a frame, %.0f s in all", reference.deviceTag(), cpuMean,
           ProcessInfo.processInfo.systemUptime - started))
+      if comparison.wantsProbe {
+        for line in lines { log.info("benchmark: \(line)") }
+        lines = backend.probeAgainstReference(model: model, directory: directory, progress: progress)
+      }
       return lines
     } catch {
       lock.lock()

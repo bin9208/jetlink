@@ -454,6 +454,93 @@ enum Patches {
     return done
   }
 
+  // MARK: prescale_vision_layernorm
+
+  /// How much `prescaleVisionLayerNorm` divides a vision norm's input by.
+  static let visionLayerNormPrescale: Float = 32
+
+  /// Feeds every fp16 LayerNormalization the policy prescale left alone (the
+  /// vision trunk's) its input times 1/k and its epsilon divided by k², so it
+  /// computes the same norm, and returns how many norms.
+  ///
+  /// carrot's N16 reaches its vision norms with values up to about 2000 on a
+  /// real road: 24 of its 44 have a sum of squares over the normalized axis
+  /// past fp16's 65504, 22 a single square past it. A Snapdragon 8 Gen 2
+  /// (HTP v73) ran N16 right that way; on an 8 Elite (v79) its plan and lead
+  /// were metres from the CPU's on the same frames. Divided by 32 the worst
+  /// sum is about 4000. LayerNorm(x / k) with epsilon / k² is LayerNorm(x)
+  /// with epsilon exactly.
+  static func prescaleVisionLayerNorm(_ g: inout Graph, k: Float = visionLayerNormPrescale) throws -> Int {
+    let const = "__layernorm_vision_prescale_\(Int(k))"
+    let policyConst = "__layernorm_prescale_\(layerNormPrescale)"
+    var scaledByPolicy = Set<String>()
+    for node in g.nodes where node.op == "Mul" && node.inputs.count == 2 && (node.inputs[1] == policyConst || node.inputs[1] == const) {
+      if let out = node.outputs.first { scaledByPolicy.insert(out) }
+    }
+    let types = staticTypes(g)
+    var new: [Node] = []
+    new.reserveCapacity(g.nodes.count + 64)
+    var scaled: [String: String] = [:]
+    var done = 0
+    for node in g.nodes {
+      var node = node
+      if node.op == "LayerNormalization", let x = node.inputs.first, !scaledByPolicy.contains(x), types[x] == DataType.float16 {
+        if scaled[x] == nil {
+          scaled[x] = "\(x)__vision_scaled"
+          new.append(Node(inputs: [x, const], outputs: ["\(x)__vision_scaled"], name: "\(x)__vision_prescale", opType: "Mul"))
+        }
+        node.inputs[0] = scaled[x]!
+        let epsilon = node.attribute("epsilon")?.f ?? 1e-5
+        node.attributes.removeAll { $0.name == "epsilon" }
+        node.attributes.append(.floatValue("epsilon", epsilon / (k * k)))
+        done += 1
+      }
+      new.append(node)
+    }
+    if done > 0 {
+      let bits = Float16(1 / k).bitPattern.littleEndian
+      g.initializers.append(
+        Tensor(
+          name: const, dims: [], dataType: DataType.float16,
+          raw: .owned([UInt8(truncatingIfNeeded: bits), UInt8(truncatingIfNeeded: bits >> 8)])))
+      g.nodes = new
+    }
+    return done
+  }
+
+  // MARK: probes
+
+  /// Makes graph outputs of tensors to compare between two runtimes: the
+  /// outputs of the request's ops whose value info is static and float, at
+  /// most `limit` of them evenly over the graph, or the request's names that
+  /// the graph has so. Returns them in graph order with their op.
+  static func addProbes(_ g: inout Graph, _ request: CoreMLPreparation.ProbeRequest) -> [(name: String, op: String)] {
+    var info: [String: ValueInfo] = [:]
+    for vi in g.valueInfo + g.inputs where vi.elemType == DataType.float16 || vi.elemType == DataType.float {
+      guard let dims = vi.shape?.dims, !dims.isEmpty, dims.allSatisfy({ ($0.value ?? 0) > 0 }) else { continue }
+      info[vi.key] = vi
+    }
+    let outputs = Set(g.outputs.map(\.key))
+    var candidates: [(name: String, op: String)] = []
+    let wanted = request.names.map(Set.init)
+    for n in g.nodes {
+      for out in n.outputs where info[out] != nil && !outputs.contains(out) {
+        if let wanted {
+          if wanted.contains(out) { candidates.append((out, n.op)) }
+        } else if request.ops.contains(n.op) {
+          candidates.append((out, n.op))
+        }
+      }
+    }
+    var chosen = candidates
+    if request.names == nil, candidates.count > request.limit, request.limit > 0 {
+      let step = Double(candidates.count) / Double(request.limit)
+      chosen = (0..<request.limit).map { candidates[Int(Double($0) * step)] }
+    }
+    for c in chosen { g.outputs.append(info[c.name]!) }
+    return chosen
+  }
+
   // MARK: finite_softmax_masks
 
   /// What a masked attention score becomes instead of fp16 -inf. Any score

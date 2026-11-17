@@ -95,6 +95,16 @@ struct Attribute {
     return Attribute(bytes: .owned(e.tail), name: name, type: 2, i: value, f: 0, ints: [], s: "", floats: [], t: nil)
   }
 
+  /// A FLOAT attribute as onnx.helper.make_attribute writes it: name, f, type.
+  static func floatValue(_ name: String, _ value: Float) -> Attribute {
+    var e = Encoded()
+    e.stringField(1, name)
+    e.tag(2, .fixed32)
+    withUnsafeBytes(of: value.bitPattern.littleEndian) { e.bytes($0) }
+    e.intField(20, 1)
+    return Attribute(bytes: .owned(e.tail), name: name, type: 1, i: 0, f: value, ints: [], s: "", floats: [], t: nil)
+  }
+
   /// An INTS attribute as make_attribute writes it: name, one ints field per
   /// value (AttributeProto.ints is not declared packed), type.
   static func ints(_ name: String, _ values: [Int64]) -> Attribute {

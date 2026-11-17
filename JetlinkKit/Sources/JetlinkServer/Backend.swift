@@ -97,11 +97,16 @@ public protocol EngineBackend: AnyObject, Sendable {
   /// against (`EngineHost.compareWithReference`); nil when this already is
   /// the CPU or the backend has none.
   func referenceBackend() -> (any EngineBackend)?
+  /// Finds where the accelerator's results leave the CPU's inside the model
+  /// (`OrtBackend.probeAgainstReference`): lines for the log, none when the
+  /// backend cannot.
+  func probeAgainstReference(model: URL, directory: URL, progress: @escaping (String) -> Void) -> [String]
 }
 
 extension EngineBackend {
   public func afterBenchmark(directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
   public func referenceBackend() -> (any EngineBackend)? { nil }
+  public func probeAgainstReference(model: URL, directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
 }
 
 extension Engine {

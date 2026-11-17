@@ -43,9 +43,27 @@ public enum CoreMLPreparation {
     /// (`--device ane-whole`): model.onnx, with the policy's norms prescaled
     /// and the vision heads in fp32.
     case aneWhole
+    /// `aneWhole` for a Snapdragon's Hexagon NPU (`htp-whole`), with the
+    /// vision trunk's norms prescaled too (`prescaleVisionLayerNorm`).
+    case hexagonWhole
     /// One model for TensorRT or the CPU: model.onnx, tinygrad's ops
     /// stripped and the images fp16, nothing else changed.
     case plain
+  }
+
+  /// Which tensors a probe preparation makes graph outputs: up to `limit`
+  /// of those the listed ops write, spread over the graph, or exactly
+  /// `names` where the graph has them.
+  public struct ProbeRequest: Sendable {
+    public var ops: Set<String>
+    public var limit: Int
+    public var names: [String]?
+
+    public init(ops: Set<String> = ["LayerNormalization", "Softmax", "Gelu", "MatMul", "Gemm", "Conv"], limit: Int = 160, names: [String]? = nil) {
+      self.ops = ops
+      self.limit = limit
+      self.names = names
+    }
   }
 
   public struct Part: Sendable, Equatable {
@@ -60,6 +78,11 @@ public enum CoreMLPreparation {
   }
 
   public struct Report: Sendable, Equatable {
+    public static func == (a: Report, b: Report) -> Bool {
+      a.stripped == b.stripped && a.retypedImages == b.retypedImages && a.gathers == b.gathers && a.gemms == b.gemms
+        && a.tiles == b.tiles && a.norms == b.norms && a.heads == b.heads && a.masks == b.masks && a.parts == b.parts
+        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.probes.map(\.name) == b.probes.map(\.name)
+    }
     /// tinygrad layout ops bypassed.
     public let stripped: Int
     /// Whether uint8 image inputs were retyped to fp16.
@@ -80,6 +103,12 @@ public enum CoreMLPreparation {
     /// Constant Softmax masks made an fp16 bias the scores add
     /// (`additiveSoftmaxMasks`); 0 unless the layout is `.aneWhole`.
     public var biasMasks: Int = 0
+    /// Vision LayerNormalizations prescaled (`prescaleVisionLayerNorm`); 0
+    /// unless the layout is `.aneWhole`.
+    public var visionNorms: Int = 0
+    /// The tensors made graph outputs for a probe, in graph order, with the
+    /// op that writes each (`Patches.addProbes`); empty unless asked for.
+    public var probes: [(name: String, op: String)] = []
     public let parts: [Part]
   }
 
@@ -101,18 +130,20 @@ public enum CoreMLPreparation {
   public static func prepare(
     source: URL, into directory: URL, layout: Layout,
     cacheKey: (String) -> String,
-    progress: ((Double) -> Void)? = nil
+    progress: ((Double) -> Void)? = nil,
+    probes: ProbeRequest? = nil
   ) throws -> Report {
     let data = try Data(contentsOf: source, options: .alwaysMapped)
     return try data.withUnsafeBytes { buf in
-      try prepare(Source(bytes: buf), into: directory, layout: layout, cacheKey: cacheKey, progress: progress)
+      try prepare(Source(bytes: buf), into: directory, layout: layout, cacheKey: cacheKey, progress: progress, probes: probes)
     }
   }
 
   private static func prepare(
     _ src: Source, into directory: URL, layout: Layout,
     cacheKey: (String) -> String,
-    progress: ((Double) -> Void)?
+    progress: ((Double) -> Void)?,
+    probes probeRequest: ProbeRequest? = nil
   ) throws -> Report {
     var (model, g) = try Decode.preparable(src)
 
@@ -133,11 +164,19 @@ public enum CoreMLPreparation {
     var heads = 0
     var masks = 0
     var biasMasks = 0
-    if layout == .aneWhole {
+    var visionNorms = 0
+    if layout == .aneWhole || layout == .hexagonWhole {
       norms = try Patches.prescaleLayerNorm(&g)
       heads = try Patches.headsInFP32(&g, src)
+      if layout == .hexagonWhole {
+        visionNorms = try Patches.prescaleVisionLayerNorm(&g)
+      }
       biasMasks = try Patches.additiveSoftmaxMasks(&g, src)
       masks = try Patches.finiteSoftmaxMasks(&g, src)
+    }
+    var probed: [(name: String, op: String)] = []
+    if let probeRequest {
+      probed = Patches.addProbes(&g, probeRequest)
     }
     model.graph = g
 
@@ -146,7 +185,7 @@ public enum CoreMLPreparation {
     case .split:
       let (vision, policy) = try Split.visionPolicy(model)
       parts = [("vision", vision), ("policy", policy)]
-    case .whole, .aneWhole, .plain:
+    case .whole, .aneWhole, .hexagonWhole, .plain:
       parts = [("model", model)]
     }
     for i in parts.indices where layout != .plain {
@@ -159,6 +198,8 @@ public enum CoreMLPreparation {
       stripped: stripped, retypedImages: retyped, gathers: gathers, gemms: gemms, tiles: tiles,
       norms: norms, heads: heads, masks: masks, parts: reported)
     report.biasMasks = biasMasks
+    report.visionNorms = visionNorms
+    report.probes = probed
     return report
   }
 

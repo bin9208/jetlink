@@ -63,7 +63,8 @@ public enum OrtProfile: String, CaseIterable, Sendable {
   var layout: CoreMLPreparation.Layout {
     switch self {
     case .ane, .htp: .split
-    case .aneWhole, .htpWhole: .aneWhole
+    case .aneWhole: .aneWhole
+    case .htpWhole: .hexagonWhole
     case .coreml, .gpu: .whole
     case .cpu:
       #if os(Android)
@@ -77,12 +78,14 @@ public enum OrtProfile: String, CaseIterable, Sendable {
   /// What a build writes: 5 is every graph split on `ane` and Expand as Tile
   /// on both, 6 the plain graph, 7 the whole graph for the Neural Engine or
   /// the Hexagon NPU with finite attention masks, 8 that with constant
-  /// attention masks as an added fp16 bias. An artifact prepared under
+  /// attention masks as an added fp16 bias, 9 the Hexagon NPU's with the
+  /// vision norms prescaled too. An artifact prepared under
   /// another rebuilds.
   public var prepareVersion: Int {
     switch layout {
     case .plain: 6
     case .aneWhole: 8
+    case .hexagonWhole: 9
     case .split, .whole: 5
     }
   }

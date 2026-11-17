@@ -76,3 +76,34 @@ import Testing
     #expect(g.nodes.contains { $0.op == "Where" })
   }
 }
+
+@Suite struct VisionLayerNormTests {
+  private let none = Source(bytes: UnsafeRawBufferPointer(start: nil, count: 0))
+
+  @Test func visionNormsGetTheirInputDividedAndTheirEpsilonWithIt() throws {
+    var b = OnnxGraphBuilder()
+    b.input("x", DataType.float16, [1, 4, 8])
+    b.valueInfo("x", DataType.float16, [1, 4, 8])
+    b.fp16("w", [8], Array(repeating: 1, count: 8))
+    b.fp16("bias", [8], Array(repeating: 0, count: 8))
+    b.node("LayerNormalization", ["x", "w", "bias"], ["y"], [.floatValue("epsilon", 1e-5), .int("axis", -1)])
+    // one the policy prescale already fed
+    b.fp16("__layernorm_prescale_8", [], [0.125])
+    b.node("Mul", ["x", "__layernorm_prescale_8"], ["x__scaled"])
+    b.node("LayerNormalization", ["x__scaled", "w", "bias"], ["z"])
+    b.output("y", DataType.float16, [1, 4, 8])
+    b.output("z", DataType.float16, [1, 4, 8])
+    var g = b.graph
+    #expect(try Patches.prescaleVisionLayerNorm(&g) == 1)
+    let norms = g.nodes.filter { $0.op == "LayerNormalization" }
+    #expect(norms[0].inputs[0] == "x__vision_scaled")
+    #expect(norms[1].inputs[0] == "x__scaled")
+    let eps = try #require(norms[0].attribute("epsilon")?.f)
+    #expect(abs(eps - 1e-5 / 1024) < 1e-12)
+    #expect(norms[0].attribute("axis")?.i == -1)
+    let mul = try #require(g.nodes.first { $0.outputs == ["x__vision_scaled"] })
+    #expect(mul.op == "Mul" && mul.inputs == ["x", "__layernorm_vision_prescale_32"])
+    // and once is enough
+    #expect(try Patches.prescaleVisionLayerNorm(&g) == 0)
+  }
+}

@@ -23,7 +23,7 @@ struct OrtBackendTests {
       (.coreml, ["model"], [.coreML("CPUAndGPU")], "whole"),
       (.aneWhole, ["model"], [.coreML("ALL")], "aneWhole"),
       (.htp, ["vision", "policy"], [.htp, .qnnGPU], "split"),
-      (.htpWhole, ["model"], [.htp], "aneWhole"),
+      (.htpWhole, ["model"], [.htp], "hexagonWhole"),
       (.gpu, ["model"], [.qnnGPU], "whole"),
       (.cpu, ["model"], [.cpu], cpuLayout),
     ]
