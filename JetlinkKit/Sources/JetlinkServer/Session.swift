@@ -333,7 +333,7 @@ final class Session: @unchecked Sendable {
       "sleep_after": host.hooks.sleepAfter,
       // The newer of this server's pick and the comma's; a comma whose own
       // pick is older takes this one (PickStore).
-      "pick": PickStore.wire(host.picks.meet(hello?["pick"] as? [String: Any])),
+      "pick": PickStore.wire(host.picks.meet(namedPick(hello?["pick"] as? [String: Any]))),
       // Whether a model neither end has is downloaded here when the comma asks:
       // a comma parked without this server fetches a new pick itself only if not.
       "fetches": host.fetcher?.canFetch ?? false,
@@ -364,6 +364,14 @@ final class Session: @unchecked Sendable {
   /// would say all is well until its first frame came back NOT_READY and
   /// cost a demotion. The error makes it rejoin now: a hello, then its model
   /// request.
+  /// The comma's pick, whose name the apps then show for that model.
+  private func namedPick(_ pick: [String: Any]?) -> [String: Any]? {
+    if let pick, let sha = pick["sha256"] as? String, CacheLayout.isSHA256(sha), let name = pick["name"] as? String, !name.isEmpty {
+      host.emit(.commaNamed(sha256: sha, name: name))
+    }
+    return pick
+  }
+
   private func onPing(_ message: Message) throws {
     guard greeted || request != nil else {
       try error(message.seq, "no_hello", "no hello on this connection; the server restarted or reopened the link since, so say hello again")
@@ -416,7 +424,9 @@ final class Session: @unchecked Sendable {
     }
     try handle.seek(toOffset: offset)
     try handle.write(contentsOf: data)
-    // Silent on purpose: the client streams chunks without reading between them.
+    // Silent to the comma on purpose: it streams chunks without reading
+    // between them. The apps show how far it is.
+    host.uploadProgress(request, bytes: Int64(offset) + Int64(data.count))
   }
 
   private func onUploadDone(_ message: Message) throws {
@@ -428,6 +438,7 @@ final class Session: @unchecked Sendable {
     let digest = (try? Registry.hashFile(path))?.0
     if digest != request.sha256 {
       try? FileManager.default.removeItem(at: path)
+      host.uploadProgress(request, bytes: 0, outcome: "failed")
       try sendJSON(
         .engineResp, seq: message.seq,
         [
@@ -436,6 +447,7 @@ final class Session: @unchecked Sendable {
       return
     }
     progress("upload", 1, "verified")
+    host.uploadProgress(request, bytes: request.nbytes, outcome: "done")
     try sendJSON(.engineResp, seq: message.seq, host.request(request, session: self))
   }
 

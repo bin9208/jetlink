@@ -18,4 +18,8 @@ extension Registry: ModelRegistry {
   ) async throws -> URL {
     try await fetch(pointer: Pointer(oid: sha256, size: size), progress: progress, shouldStop: shouldStop)
   }
+
+  public func nameModel(sha256: String, name: String) throws {
+    try nameModel(sha256: sha256, name: name, bytes: 0, replace: false)
+  }
 }

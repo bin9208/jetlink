@@ -22,6 +22,12 @@ public protocol ModelRegistry: Sendable {
   func importModelFile(at url: URL, name: String?, progress: @escaping @Sendable (Double) -> Void) async throws -> String
   func inventory(artifactTag: String?, artifactSuffix: String, loaded: String?) -> InventoryEvent
   func remove(sha256: String, artifacts: Bool, model: Bool) throws
+  /// Names a model no catalog lists, as the comma that uploads it calls it.
+  func nameModel(sha256: String, name: String) throws
+}
+
+extension ModelRegistry {
+  public func nameModel(sha256: String, name: String) throws {}
 }
 
 /// The control channel's semantics in process: the Swift form of
@@ -36,6 +42,9 @@ public final class ServerController: @unchecked Sendable {
   static let inventoryTTL: TimeInterval = 2
   static let progressInterval: TimeInterval = 0.25
   static let rateInterval: TimeInterval = 0.5
+  /// Uploads from the comma in flight: bytes and time of the last rate
+  /// sample, and the rate.
+  private var uploads: [String: (bytes: Int64, at: TimeInterval, rate: Double)] = [:]
 
   public let server: Server
 
@@ -234,7 +243,45 @@ public final class ServerController: @unchecked Sendable {
       publish(.benchmark(event))
     case .shutdownRequested(let reason):
       publish(.shutdownRequest(ShutdownRequestEvent(reason: reason)))
+    case .upload(let sha256, let bytes, let total, let outcome):
+      onUpload(sha256: sha256, bytes: bytes, total: total, outcome: outcome)
+    case .commaNamed(let sha256, let name):
+      guard registry.name(for: sha256).name == nil else { return }
+      do {
+        try registry.nameModel(sha256: sha256, name: name)
+        publishInventory()
+      } catch {
+        log.warning("could not name \(sha256.prefix(16)) \(name): \(error)")
+      }
     }
+  }
+
+  /// A model coming from the comma, shown as a download is: its row moves
+  /// from the first chunk, so a first install of a big model does not look
+  /// like nothing is happening.
+  private func onUpload(sha256: String, bytes: Int64, total: Int64, outcome: String) {
+    let now = ProcessInfo.processInfo.systemUptime
+    lock.lock()
+    var rate = uploads[sha256]?.rate ?? 0
+    let first = uploads[sha256] == nil
+    if let last = uploads[sha256], now - last.at >= ServerController.rateInterval, bytes >= last.bytes {
+      rate = Double(bytes - last.bytes) / (now - last.at)
+      uploads[sha256] = (bytes, now, rate)
+    } else if first {
+      uploads[sha256] = (bytes, now, 0)
+    }
+    if outcome != "progress" { uploads[sha256] = nil }
+    lock.unlock()
+    let frac = total > 0 ? min(max(Double(bytes) / Double(total), 0), 1) : 0
+    let state = outcome == "progress" ? (first ? "started" : "progress") : outcome
+    publish(
+      .download(
+        DownloadEvent(
+          sha256: sha256, ref: nil, state: state, frac: pythonRound(frac, 4), bytes: bytes, total: total,
+          rateBps: pythonRound(rate, 1), detail: outcome == "failed" ? "the model from the comma did not check out; it will send it again" : "from the comma",
+          source: "comma")))
+    // the partial file is on disk from the first chunk; done or failed changed it again
+    if first || outcome != "progress" { publishInventory() }
   }
 
   // MARK: commands

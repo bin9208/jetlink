@@ -93,6 +93,11 @@ public enum HostEvent: Sendable {
   /// The comma asked for a power-off, which this server refused: the host
   /// passed no shutdown hook, or its hook declined.
   case shutdownRequested(reason: String)
+  /// A model coming from the comma over the link: bytes so far of total;
+  /// `outcome` "progress", "done" or "failed".
+  case upload(sha256: String, bytes: Int64, total: Int64, outcome: String)
+  /// The comma's hello named its pick: what it calls that model.
+  case commaNamed(sha256: String, name: String)
 }
 
 /// Process-wide owner of the loaded engine and of the build in flight: the
@@ -113,6 +118,8 @@ public final class EngineHost: @unchecked Sendable {
   var session: Session?
   /// A benchmark owns the engine: frames from a comma are answered NOT_READY.
   var benchmarking = false
+  /// When the last upload progress went out (`uploadProgress`).
+  private var lastUpload: TimeInterval = 0
   /// When the comma last did something, a frame, a hello or the load it
   /// asked for: `warmIfIdle` goes by it.
   var lastSeenAt: TimeInterval = 0
@@ -567,6 +574,19 @@ public final class EngineHost: @unchecked Sendable {
 
   private var progressFn: ProgressFn {
     { [weak self] stage, frac, msg in self?.progress(stage, frac, msg) }
+  }
+
+  /// An upload's progress for the apps, at most every half second until it ends.
+  func uploadProgress(_ request: Request, bytes: Int64, outcome: String = "progress") {
+    let now = ProcessInfo.processInfo.systemUptime
+    lock.lock()
+    if outcome == "progress" && bytes < request.nbytes && now - lastUpload < 0.5 {
+      lock.unlock()
+      return
+    }
+    lastUpload = now
+    lock.unlock()
+    emit(.upload(sha256: request.sha256, bytes: bytes, total: request.nbytes, outcome: outcome))
   }
 
   func progress(_ stage: String, _ frac: Double, _ msg: String, force: Bool = false) {

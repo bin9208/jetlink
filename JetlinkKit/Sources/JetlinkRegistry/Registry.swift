@@ -204,8 +204,34 @@ public final class Registry: Sendable {
     let index = modelIndex()
     let locals = localModels()
     return { sha256 in
-      let name = index?.listed(oid: sha256)?.name ?? locals.first { $0.sha256 == sha256 }?.name
+      let name =
+        index?.listed(oid: sha256)?.name ?? locals.first { $0.sha256 == sha256 && !$0.name.isEmpty }?.name
+        ?? KnownModels.names[sha256]
       return (name, index?.ref(oid: sha256))
+    }
+  }
+
+  /// Names a model the catalog does not know, the way an import does, file
+  /// or not: a comma that uploads one says what it calls it. A name already
+  /// recorded for it stays unless `replace`.
+  public func nameModel(sha256: String, name: String, bytes: Int64 = 0, replace: Bool = false) throws(RegistryError) {
+    guard CacheLayout.isSHA256(sha256), !name.isEmpty else { return }
+    try lock.withLock { _ throws(RegistryError) in
+      var records = localRecords()
+      if let i = records.firstIndex(where: { $0["sha256"] == .string(sha256) }) {
+        let had = records[i]["name"].flatMap { $0.truthy ? $0.pythonString : nil } ?? ""
+        guard replace || had.isEmpty, had != name else { return }
+        records[i]["name"] = .string(name)
+      } else {
+        records.append([
+          "sha256": .string(sha256), "bytes": .int(bytes), "name": .string(name), "added_at": .double(Date().timeIntervalSince1970),
+        ])
+      }
+      do {
+        try Files.writeJSON(.array(records.map(JSON.object)), to: layout.localModelsURL)
+      } catch {
+        throw .registry("could not name \(sha256.prefix(16)): \(error.localizedDescription)")
+      }
     }
   }
 
@@ -498,6 +524,9 @@ public final class Registry: Sendable {
     for local in localModels() where CacheLayout.isSHA256(local.sha256) {
       out[String(local.sha256.prefix(16))] = local.sha256
     }
+    for sha256 in KnownModels.names.keys where out[String(sha256.prefix(16))] == nil {
+      out[String(sha256.prefix(16))] = sha256
+    }
     for fileName in Files.names(in: layout.engines) where fileName.hasSuffix(".json") {
       guard let sha256 = Files.readJSON(layout.engines.appending(path: fileName))?["spec"]?["sha256"]?.string,
         CacheLayout.isSHA256(sha256)
@@ -553,4 +582,15 @@ public final class Registry: Sendable {
       }
     }
   }
+}
+
+/// Models no catalog lists that the apps should still name: carrot's own
+/// driving models, which a comma uploads. A comma also names its pick in its
+/// hello (`Registry.nameModel`); this covers a comma too old to, and a model
+/// uploaded before this build.
+public enum KnownModels {
+  public static let names: [String: String] = [
+    // carrot's navigation model (Navigate on openpilot), 814,591,107 bytes
+    "01effc679eb46d6036ce0302673a87fe2dcfcc95a679daeeb929679e53c3647a": "N16 Nav (carrot)"
+  ]
 }

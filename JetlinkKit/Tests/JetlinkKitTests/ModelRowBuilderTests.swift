@@ -232,3 +232,19 @@ struct ModelRowBuilderTests {
     #expect(ModelRowBuilder.build(catalog: nil, inventory: nil, downloads: [:], engine: .none, link: .waiting).isEmpty)
   }
 }
+
+@Suite struct CommaUploadRowTests {
+  @Test("A model the comma is still sending shows its upload on its 16-hex row")
+  func uploadOnAPartialFile() {
+    let sha = String(repeating: "ab", count: 32)
+    let short = String(sha.prefix(16))
+    let inventory = InventoryEvent(
+      loaded: nil, lastLoaded: nil, models: [InventoryModel(sha256: short, bytes: 10, path: "/m/\(short).onnx", name: nil, ref: nil)],
+      artifacts: [], disk: InventoryDisk(modelsBytes: 10, enginesBytes: 0, freeBytes: 0))
+    let upload = DownloadEvent(
+      sha256: sha, ref: nil, state: "progress", frac: 0.25, bytes: 25, total: 100, rateBps: 5, detail: "from the comma", source: "comma")
+    let rows = ModelRowBuilder.build(catalog: nil, inventory: inventory, downloads: [sha: upload], engine: .none, link: .waiting)
+    #expect(rows.count == 1)
+    #expect(rows[0].status == .downloading(frac: 0.25, rateBps: 5))
+  }
+}

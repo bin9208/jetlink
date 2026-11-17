@@ -157,7 +157,8 @@ public enum ModelRowBuilder {
         isOrphan: name == nil || !shaIsComplete)
       row.status = status(
         sha: sha,
-        download: downloads[sha],
+        // a model the comma is still sending has only its file's 16-hex name here
+        download: downloads[sha] ?? (sha.count == 16 ? downloads.first { $0.key.hasPrefix(sha) }?.value : nil),
         engine: engine,
         artifacts: row.preparedFor,
         hasModelFile: model != nil)
