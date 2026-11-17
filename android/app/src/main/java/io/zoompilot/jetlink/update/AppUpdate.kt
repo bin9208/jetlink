@@ -29,8 +29,12 @@ object AppUpdate {
     private const val PREFS = "app_update"
     private const val CHECKED_AT = "checked_at"
     private const val SKIPPED = "skipped_build"
-    /** At most this often unless asked: GitHub allows 60 calls an hour unsigned. */
-    private const val INTERVAL_MS = 6 * 3600 * 1000L
+    /**
+     * At most this often unless asked (the Check for Updates button): each
+     * time the app comes to the front and every half hour while it stays
+     * there, within GitHub's 60 unsigned calls an hour.
+     */
+    private const val INTERVAL_MS = 10 * 60 * 1000L
 
     /** "stable" or "test", as the build's flavor says. */
     val channel: String get() = BuildConfig.CHANNEL
@@ -168,5 +172,25 @@ object AppUpdate {
         return Intent(Intent.ACTION_VIEW)
             .setDataAndType(uri, "application/vnd.android.package-archive")
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+}
+
+/**
+ * The update the app offers, wherever it was found: the check when the app
+ * comes to the front or every half hour (UpdateAlert), or the Check for
+ * Updates button in Settings. UpdateAlert shows it.
+ */
+object UpdateCenter {
+    val offer = kotlinx.coroutines.flow.MutableStateFlow<AppUpdate.Release?>(null)
+
+    /** Checks and offers a newer release; returns it, or null when there is none. */
+    suspend fun check(context: Context, force: Boolean): AppUpdate.Release? {
+        val found = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { AppUpdate.check(context, force) }
+        }
+        found.exceptionOrNull()?.let { if (force) throw it }
+        val release = found.getOrNull() ?: return null
+        offer.value = release
+        return release
     }
 }

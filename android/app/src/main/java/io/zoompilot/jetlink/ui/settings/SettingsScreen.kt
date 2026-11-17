@@ -1,5 +1,9 @@
 package io.zoompilot.jetlink.ui.settings
 
+import io.zoompilot.jetlink.update.AppUpdate
+import io.zoompilot.jetlink.update.UpdateCenter
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -338,8 +342,31 @@ private fun About(values: SettingsValues, info: SettingsInfo, actions: SettingsA
         RunState.Serving -> "Running"
         is RunState.Failed -> "Failed"
     }
+    val scope = rememberCoroutineScope()
+    var checking by remember { mutableStateOf(false) }
+    val checkForUpdates: () -> Unit = {
+        if (!checking) {
+            checking = true
+            scope.launch {
+                val message = try {
+                    if (UpdateCenter.check(context, force = true) == null) "최신 버전이에요 (${info.version})" else null
+                } catch (error: Exception) {
+                    "업데이트를 확인하지 못했어요: ${error.message ?: error}"
+                }
+                checking = false
+                message?.let { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
+            }
+        }
+    }
     FormSection("About") {
         ValueRow("Version", info.version, Modifier.clickable(onClick = tapVersion))
+        RowDivider()
+        ValueRow("Update Channel", if (AppUpdate.channel == "test") "테스트 (사전 릴리스)" else "메인 (정식 릴리스)")
+        RowDivider()
+        ActionRow(
+            if (checking) "업데이트 확인 중…" else "업데이트 확인", checkForUpdates,
+            color = MaterialTheme.colorScheme.primary, chevron = false,
+        )
         RowDivider()
         ValueRow("Runtime", info.runtime?.let { "onnxruntime $it" } ?: "onnxruntime")
         RowDivider()

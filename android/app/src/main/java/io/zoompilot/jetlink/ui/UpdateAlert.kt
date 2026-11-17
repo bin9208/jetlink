@@ -23,6 +23,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import io.zoompilot.jetlink.BuildConfig
 import io.zoompilot.jetlink.update.AppUpdate
+import io.zoompilot.jetlink.update.UpdateCenter
+import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
+import kotlinx.coroutines.delay
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -42,9 +47,22 @@ fun UpdateAlert() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf<UpdateState>(UpdateState.None) }
+    // each time the app comes to the front, and every half hour while it stays there
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        scope.launch { UpdateCenter.check(context, force = false) }
+    }
     LaunchedEffect(Unit) {
-        val release = withContext(Dispatchers.IO) { runCatching { AppUpdate.check(context) }.getOrNull() }
-        if (release != null) state = UpdateState.Offer(release)
+        while (true) {
+            delay(30 * 60 * 1000L)
+            UpdateCenter.check(context, force = false)
+        }
+    }
+    // whoever found it (here, or Settings' Check for Updates), it is offered here
+    val offered by UpdateCenter.offer.collectAsState()
+    LaunchedEffect(offered) {
+        val release = offered ?: return@LaunchedEffect
+        if (state == UpdateState.None) state = UpdateState.Offer(release)
+        UpdateCenter.offer.value = null
     }
     fun start(release: AppUpdate.Release) {
         state = UpdateState.Downloading(release, 0.0)
