@@ -106,6 +106,9 @@ public protocol EngineBackend: AnyObject, Sendable {
   /// (`OrtBackend.profileOnAccelerator`): lines for the log, none when the
   /// backend cannot.
   func profileOnAccelerator(model: URL, directory: URL, progress: @escaping (String) -> Void) -> [String]
+  /// The built artifact timed under each way of running it the backend can
+  /// choose without building again (`OrtBackend.compareVariants`).
+  func compareVariants(artifact: URL, progress: @escaping (String) -> Void) -> [String]
 }
 
 extension EngineBackend {
@@ -113,6 +116,7 @@ extension EngineBackend {
   public func referenceBackend() -> (any EngineBackend)? { nil }
   public func probeAgainstReference(model: URL, directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
   public func profileOnAccelerator(model: URL, directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
+  public func compareVariants(artifact: URL, progress: @escaping (String) -> Void) -> [String] { [] }
 }
 
 extension Engine {

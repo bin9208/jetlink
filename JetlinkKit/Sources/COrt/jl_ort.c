@@ -15,6 +15,10 @@ struct jl_env {
 
 struct jl_session {
   OrtSession *session;
+  // QNN's HTP shared memory (rpcmem), made on first use: buffers the NPU
+  // reads and writes in place, with no copy each run.
+  OrtAllocator *shared;
+  OrtMemoryInfo *shared_info;
 };
 
 struct jl_binding {
@@ -195,8 +199,37 @@ void jl_session_release(jl_session *session) {
   if (session == NULL) {
     return;
   }
+  if (session->shared != NULL) {
+    api()->ReleaseAllocator(session->shared);
+  }
+  if (session->shared_info != NULL) {
+    api()->ReleaseMemoryInfo(session->shared_info);
+  }
   api()->ReleaseSession(session->session);
   free(session);
+}
+
+char *jl_shared_alloc(jl_session *session, size_t nbytes, void **out) {
+  *out = NULL;
+  char *error = NULL;
+  if (session->shared == NULL) {
+    if (session->shared_info == NULL) {
+      error = take(api()->CreateMemoryInfo("QnnHtpShared", OrtDeviceAllocator, 0, OrtMemTypeDefault, &session->shared_info));
+    }
+    if (error == NULL) {
+      error = take(api()->CreateAllocator(session->session, session->shared_info, &session->shared));
+    }
+    if (error != NULL) {
+      return error;
+    }
+  }
+  return take(api()->AllocatorAlloc(session->shared, nbytes > 0 ? nbytes : 1, out));
+}
+
+void jl_shared_free(jl_session *session, void *p) {
+  if (session != NULL && session->shared != NULL && p != NULL) {
+    api()->AllocatorFree(session->shared, p);
+  }
 }
 
 size_t jl_session_io_count(const jl_session *session, int output) {
@@ -279,6 +312,18 @@ static char *wrap(const OrtMemoryInfo *memory, const jl_tensor *t, OrtValue **ou
                                                     (ONNXTensorElementDataType)t->elem_type, out));
 }
 
+// A tensor from jl_shared_alloc is bound as the NPU's shared memory, which
+// onnxruntime then hands QNN as it is; any other as the CPU's.
+static const OrtMemoryInfo *memory_of(const jl_session *session, const OrtMemoryInfo *cpu, const jl_tensor *t) {
+  if (t->shared && session->shared != NULL) {
+    const OrtMemoryInfo *info = NULL;
+    if (api()->AllocatorGetInfo(session->shared, &info) == NULL && info != NULL) {
+      return info;
+    }
+  }
+  return cpu;
+}
+
 char *jl_binding_create(jl_session *session, const jl_tensor *inputs, size_t n_inputs,
                         const jl_tensor *outputs, size_t n_outputs, jl_binding **out) {
   *out = NULL;
@@ -299,14 +344,14 @@ char *jl_binding_create(jl_session *session, const jl_tensor *inputs, size_t n_i
   }
   for (size_t i = 0; error == NULL && i < n_inputs; i++) {
     OrtValue **value = &binding->values[binding->n_values++];
-    error = wrap(memory, &inputs[i], value);
+    error = wrap(memory_of(session, memory, &inputs[i]), &inputs[i], value);
     if (error == NULL) {
       error = take(api()->BindInput(binding->binding, inputs[i].name, *value));
     }
   }
   for (size_t i = 0; error == NULL && i < n_outputs; i++) {
     OrtValue **value = &binding->values[binding->n_values++];
-    error = wrap(memory, &outputs[i], value);
+    error = wrap(memory_of(session, memory, &outputs[i]), &outputs[i], value);
     if (error == NULL) {
       error = take(api()->BindOutput(binding->binding, outputs[i].name, *value));
     }

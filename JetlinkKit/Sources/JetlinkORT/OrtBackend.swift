@@ -201,6 +201,10 @@ public final class OrtBackend: EngineBackend {
         "htp_graph_finalization_optimization_mode": "3",
         "enable_htp_fp16_precision": "1",
         "qnn_context_priority": "high",
+        // buffers in the NPU's own memory (OrtEngine sharedMemory), and
+        // FastRPC woken for the next call within 100 us
+        "enable_htp_shared_memory_allocator": "1",
+        "rpc_control_latency": "100",
       ]
     case .qnnGPU: ["backend_type": "gpu"]
     case .coreML, .cpu: [:]
@@ -348,6 +352,50 @@ public final class OrtBackend: EngineBackend {
     return meta
   }
 
+  // MARK: variants
+
+  /// The loaded model's artifact under each way of running it this build
+  /// can choose without compiling again: NPU shared memory on or off, and
+  /// FastRPC's 100 us wake-up on or off. Each runs 8 frames to settle and
+  /// 60 timed, one at a time, beside the loaded engine. Lines for the log.
+  public func compareVariants(artifact: URL, progress: @escaping (String) -> Void) -> [String] {
+    guard profile == .htpWhole else { return [] }
+    guard let (manifest, _) = try? OrtArtifact.open(artifact, version: profile.prepareVersion, check: { _ in nil }) else {
+      return ["variants: the artifact did not open"]
+    }
+    let variants: [(name: String, shared: Bool, rpc: Bool)] = [
+      ("plain", false, false), ("rpc 100us", false, true), ("shared memory", true, false), ("shared memory + rpc 100us", true, true),
+    ]
+    var results: [String] = []
+    for (i, v) in variants.enumerated() {
+      progress("variants: \(i + 1)/\(variants.count) \(v.name)")
+      do {
+        let plans = self.plans(artifact, manifest).map { plan -> SessionPlan in
+          var options = plan.options
+          if !v.rpc { options["rpc_control_latency"] = nil }
+          if !v.shared { options["enable_htp_shared_memory_allocator"] = nil }
+          return SessionPlan(
+            model: plan.model, provider: plan.provider, options: options, threads: plan.threads, label: plan.label, usesGPU: plan.usesGPU,
+            usesNeuralEngine: plan.usesNeuralEngine)
+        }
+        let engine = try OrtEngine(plans: plans, device: deviceTag(), keepAlive: keepAlive, keepCPUWarm: false, sharedMemory: v.shared)
+        defer { engine.close() }
+        var ms: [Double] = []
+        for run in 0..<68 {
+          let t = ProcessInfo.processInfo.systemUptime
+          try engine.run()
+          if run >= 8 { ms.append((ProcessInfo.processInfo.systemUptime - t) * 1000) }
+        }
+        ms.sort()
+        let label = v.shared && !engine.usesSharedMemory ? "\(v.name) (shared memory unavailable)" : v.name
+        results.append(String(format: "%@ p50 %.2f p90 %.2f ms", label, ms[ms.count / 2], ms[ms.count * 9 / 10]))
+      } catch {
+        results.append("\(v.name) failed: \(error)")
+      }
+    }
+    return ["variants (the loaded model, 60 runs each): " + results.joined(separator: "; ")]
+  }
+
   // MARK: load
 
   public func load(artifact: URL, report: @escaping ProgressFn) throws -> any Engine {
@@ -363,7 +411,9 @@ public final class OrtBackend: EngineBackend {
     }
     let what = profile.usesCoreML ? "the CoreML model" : "the model"
     let (engine, seconds) = try Artifact.load(artifact, meta: meta, what: what, report: report) {
-      try OrtEngine(plans: plans(artifact, manifest), device: deviceTag(), keepAlive: keepAlive, keepCPUWarm: keepCPUWarm)
+      try OrtEngine(
+        plans: plans(artifact, manifest), device: deviceTag(), keepAlive: keepAlive, keepCPUWarm: keepCPUWarm,
+        sharedMemory: profile == .htpWhole)
     }
     log.info("onnxruntime sessions on \(profile.rawValue) in \(String(format: "%.1f", seconds)) s: \(engine.providers.joined(separator: " then "))")
     return engine

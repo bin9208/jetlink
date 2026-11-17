@@ -70,7 +70,11 @@ public final class OrtEngine: EngineCore, @unchecked Sendable {
   /// Whether the CPU is kept warm beside this engine: a busy thread, or
   /// Android's performance hints.
   public var keepsCPUWarm: Bool { keepWarm != nil || hint != nil }
-  public override var notes: String { "CPU keep-warm \(keepsCPUWarm ? "on" : "off")" }
+  public override var notes: String {
+    "CPU keep-warm \(keepsCPUWarm ? "on" : "off")" + (usesSharedMemory ? ", NPU shared memory" : "")
+  }
+  /// Every buffer in QNN's HTP shared memory (`sharedMemory`).
+  public let usesSharedMemory: Bool
   public override var coolsWhenIdle: Bool { usesNeuralEngine }
 
   private let chain: [OrtSession]
@@ -82,7 +86,7 @@ public final class OrtEngine: EngineCore, @unchecked Sendable {
 
   /// `keepAlive` keeps the GPU clocked up between frames, `keepCPUWarm` the
   /// CPU; each only where a plan runs on that unit.
-  public init(plans: [SessionPlan], device: String, keepAlive: Bool = true, keepCPUWarm: Bool = true) throws {
+  public init(plans: [SessionPlan], device: String, keepAlive: Bool = true, keepCPUWarm: Bool = true, sharedMemory: Bool = false) throws {
     self.device = device
     var chain: [OrtSession] = []
     for plan in plans {
@@ -90,6 +94,20 @@ public final class OrtEngine: EngineCore, @unchecked Sendable {
     }
     self.chain = chain
     self.providers = plans.map(\.label)
+    // One NPU session over every buffer: they all live in QNN's HTP shared
+    // memory, so a run moves no input, output or state between the CPU's
+    // memory and the NPU's. Anything else, or a device that cannot, the heap.
+    var allocator = HostAllocator.heap
+    var shared = false
+    if sharedMemory, chain.count == 1, plans[0].provider == "QNN", plans[0].usesNeuralEngine,
+      let probe = try? chain[0].sharedAlloc(64)
+    {
+      chain[0].sharedFree(probe)
+      let session = chain[0]
+      allocator = HostAllocator(allocate: { try session.sharedAlloc($0) }, free: { session.sharedFree($0) })
+      shared = true
+    }
+    self.usesSharedMemory = shared
 
     // What the host stages: every session's inputs no earlier session
     // produces. What it can read: every session's outputs no later one reads.
@@ -122,7 +140,7 @@ public final class OrtEngine: EngineCore, @unchecked Sendable {
     let hint = warmCPU ? PerformanceHint.make() : nil
     self.hint = hint
     self.keepWarm = warmCPU && hint == nil ? CPUKeepWarm() : nil
-    try super.init(inputs: inputs, outputs: outputs, sizes: sizes)
+    try super.init(inputs: inputs, outputs: outputs, sizes: sizes, allocator: allocator)
     // A throw from here on closes through deinit.
     try rebind([])
   }
@@ -152,7 +170,7 @@ public final class OrtEngine: EngineCore, @unchecked Sendable {
           // writes the buffer the state_ input reads next run
           return (spec, buffer(input, parity: p ^ 1)!)
         }
-        set.append(try OrtBinding(session: session, inputs: ins, outputs: outs))
+        set.append(try OrtBinding(session: session, inputs: ins, outputs: outs, shared: usesSharedMemory))
       }
       sets.append(set)
     }

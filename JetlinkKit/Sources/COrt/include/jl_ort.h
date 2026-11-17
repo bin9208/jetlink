@@ -49,6 +49,8 @@ typedef struct {
   size_t rank;
   void *data;
   size_t nbytes;
+  // data came from jl_shared_alloc on the bound session
+  int shared;
 } jl_tensor;
 
 // The runtime's version string, "1.29.0", or "" when it cannot be opened.
@@ -66,6 +68,11 @@ char *jl_session_create(jl_env *env, const char *model_path, const char *provide
                         const jl_option *config, size_t n_config, int threads,
                         jl_session **out);
 void jl_session_release(jl_session *session);
+// A buffer in QNN's HTP shared memory (rpcmem) for this session, which needs
+// the provider option enable_htp_shared_memory_allocator=1; freed with
+// jl_shared_free before the session is released.
+char *jl_shared_alloc(jl_session *session, size_t nbytes, void **out);
+void jl_shared_free(jl_session *session, void *p);
 
 // output 0 counts inputs, 1 outputs.
 size_t jl_session_io_count(const jl_session *session, int output);

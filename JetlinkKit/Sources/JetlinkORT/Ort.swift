@@ -106,6 +106,19 @@ final class OrtSession: @unchecked Sendable {
     jl_session_release(pointer)
   }
 
+  /// A buffer in QNN's HTP shared memory, which the NPU reads and writes in
+  /// place: the session's provider options must enable it.
+  func sharedAlloc(_ bytes: Int) throws -> UnsafeMutableRawPointer {
+    var p: UnsafeMutableRawPointer?
+    try OrtError.check(jl_shared_alloc(pointer, bytes, &p))
+    guard let p else { throw OrtError("onnxruntime gave no shared buffer") }
+    return p
+  }
+
+  func sharedFree(_ p: UnsafeMutableRawPointer) {
+    jl_shared_free(pointer, p)
+  }
+
   private static func describe(_ session: OpaquePointer, output: Bool) throws -> [TensorSpec] {
     try TensorSpec.described(count: jl_session_io_count(session, output ? 1 : 0)) { index, name, type, dims, rank in
       try OrtError.check(jl_session_io_info(session, output ? 1 : 0, index, &name, name.count, &type, &dims, dims.count, &rank))
@@ -117,7 +130,12 @@ final class OrtSession: @unchecked Sendable {
 final class OrtBinding {
   private let pointer: OpaquePointer
 
-  init(session: OrtSession, inputs: [(TensorSpec, UnsafeMutableRawPointer)], outputs: [(TensorSpec, UnsafeMutableRawPointer)]) throws {
+  /// `shared`: the buffers came from `session.sharedAlloc`, and are bound as
+  /// the NPU's shared memory.
+  init(
+    session: OrtSession, inputs: [(TensorSpec, UnsafeMutableRawPointer)], outputs: [(TensorSpec, UnsafeMutableRawPointer)],
+    shared: Bool = false
+  ) throws {
     var names: [UnsafeMutablePointer<CChar>?] = []
     var dims: [UnsafeMutablePointer<Int64>] = []
     defer {
@@ -130,7 +148,9 @@ final class OrtBinding {
       let shape = UnsafeMutablePointer<Int64>.allocate(capacity: max(spec.shape.count, 1))
       for (index, dim) in spec.shape.enumerated() { shape[index] = Int64(dim) }
       dims.append(shape)
-      return jl_tensor(name: name, elem_type: spec.type.rawValue, dims: shape, rank: spec.shape.count, data: data, nbytes: spec.byteCount)
+      return jl_tensor(
+        name: name, elem_type: spec.type.rawValue, dims: shape, rank: spec.shape.count, data: data, nbytes: spec.byteCount,
+        shared: shared ? 1 : 0)
     }
     let ins = inputs.map { tensor($0.0, $0.1) }
     let outs = outputs.map { tensor($0.0, $0.1) }
