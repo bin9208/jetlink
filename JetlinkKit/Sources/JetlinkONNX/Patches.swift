@@ -550,6 +550,55 @@ enum Patches {
     return done
   }
 
+  // MARK: fp16_state_io
+
+  /// Makes a stateful graph's fp32 queues (`state_X` in, `next_state_X` out)
+  /// fp16 at the graph's edge, with a Cast inside each, and returns how many
+  /// pairs. The graph computes as before; only what crosses into and out of
+  /// it each run halves.
+  ///
+  /// A Hexagon NPU computes fp16 (enable_htp_fp16_precision), so every value
+  /// such a queue holds was fp16 already: the fp32 queue only doubled what
+  /// onnxruntime moved between the CPU's memory and the NPU's every frame,
+  /// which N16's 128 x 16384 feature queue makes 8.4 MB each way. On a
+  /// Galaxy Tab S9, whose FastRPC has no shared memory for the NPU, about
+  /// 3.5 ms of Light Speed 2's 31 ms a run was outside the NPU's execute.
+  static func fp16StateIO(_ g: inout Graph) -> Int {
+    let outputs = Dictionary(uniqueKeysWithValues: g.outputs.enumerated().map { ($1.key, $0) })
+    var pairs: [(input: Int, output: Int)] = []
+    for (i, vi) in g.inputs.enumerated() where vi.key.hasPrefix("state_") && vi.elemType == DataType.float {
+      if let o = outputs["next_" + vi.key], g.outputs[o].elemType == DataType.float {
+        pairs.append((i, o))
+      }
+    }
+    guard !pairs.isEmpty else { return 0 }
+    var rename: [String: String] = [:]
+    var added: [Node] = []
+    var tail: [Node] = []
+    for (i, o) in pairs {
+      let input = g.inputs[i].key
+      let output = g.outputs[o].key
+      // the graph reads the fp32 queue from a Cast of the fp16 input
+      rename[input] = "\(input)__fp32"
+      added.append(
+        Node(inputs: [input], outputs: ["\(input)__fp32"], name: "\(input)__to_fp32", opType: "Cast", attributes: [.int("to", Int64(DataType.float))]))
+      // and writes the next one through a Cast to the fp16 output
+      rename[output] = "\(output)__fp32"
+      tail.append(
+        Node(inputs: ["\(output)__fp32"], outputs: [output], name: "\(output)__to_fp16", opType: "Cast", attributes: [.int("to", Int64(DataType.float16))]))
+      g.inputs[i].type?.tensor?.elemType = DataType.float16
+      g.outputs[o].type?.tensor?.elemType = DataType.float16
+    }
+    for n in g.nodes.indices {
+      g.nodes[n].inputs = g.nodes[n].inputs.map { rename[$0] ?? $0 }
+      g.nodes[n].outputs = g.nodes[n].outputs.map { rename[$0] ?? $0 }
+    }
+    let renamed = Set(rename.keys)
+    g.valueInfo.removeAll { renamed.contains($0.key) }
+    g.nodes = added + g.nodes + tail
+    return pairs.count
+  }
+
   // MARK: tanh_gelu
 
   static func tanhGeluOutput(_ y: String) -> String { "\(y)__tanh_gelu" }

@@ -81,13 +81,13 @@ public enum OrtProfile: String, CaseIterable, Sendable {
   /// attention masks as an added fp16 bias, 9 the Hexagon NPU's with the
   /// vision norms prescaled too, 10 with every norm in fp16-safe form, 11 back to
   /// the prescaled native norms (12, with GELU in its tanh form, was slower
-  /// and was dropped). An artifact prepared under
+  /// and was dropped), 13 with the state queues fp16 at the graph's edge. An artifact prepared under
   /// another rebuilds.
   public var prepareVersion: Int {
     switch layout {
     case .plain: 6
     case .aneWhole: 8
-    case .hexagonWhole: 11
+    case .hexagonWhole: 13
     case .split, .whole: 5
     }
   }
@@ -201,8 +201,6 @@ public final class OrtBackend: EngineBackend {
         "htp_graph_finalization_optimization_mode": "3",
         "enable_htp_fp16_precision": "1",
         "qnn_context_priority": "high",
-        // FastRPC woken for the next call within 100 us
-        "rpc_control_latency": "100",
       ]
     case .qnnGPU: ["backend_type": "gpu"]
     case .coreML, .cpu: [:]
@@ -390,7 +388,7 @@ public final class OrtBackend: EngineBackend {
       do {
         let plans = self.plans(artifact, manifest).map { plan -> SessionPlan in
           var options = plan.options
-          if !v.rpc { options["rpc_control_latency"] = nil }
+          if v.rpc { options["rpc_control_latency"] = "100" }
           if v.shared { options[OrtBackend.sharedMemoryOption] = "1" }
           return SessionPlan(
             model: plan.model, provider: plan.provider, options: options, threads: plan.threads, label: plan.label, usesGPU: plan.usesGPU,

@@ -150,3 +150,28 @@ import Testing
     #expect(last.op == "Mul" && last.displayName == Patches.tanhGeluOutput("y"))
   }
 }
+
+@Suite struct FP16StateIOTests {
+  @Test func aStatePairIsFp16AtTheEdgeAndFp32Inside() throws {
+    var b = OnnxGraphBuilder(opset: 20)
+    b.input("state_feat_q", DataType.float, [4, 2])
+    b.input("x", DataType.float, [1, 2])
+    b.input("state_img_q", DataType.uint8, [4])
+    b.node("Concat", ["state_feat_q", "x"], ["next_state_feat_q"], [.int("axis", 0)])
+    b.node("Identity", ["state_img_q"], ["next_state_img_q"])
+    b.node("Identity", ["state_feat_q"], ["outputs"])
+    b.output("next_state_feat_q", DataType.float, [5, 2])
+    b.output("next_state_img_q", DataType.uint8, [4])
+    b.output("outputs", DataType.float, [4, 2])
+    var g = b.graph
+    #expect(Patches.fp16StateIO(&g) == 1)
+    #expect(g.inputs.first { $0.key == "state_feat_q" }?.elemType == DataType.float16)
+    #expect(g.outputs.first { $0.key == "next_state_feat_q" }?.elemType == DataType.float16)
+    #expect(g.inputs.first { $0.key == "state_img_q" }?.elemType == DataType.uint8)
+    #expect(g.nodes.first?.op == "Cast" && g.nodes.first?.inputs == ["state_feat_q"])
+    #expect(g.nodes.last?.op == "Cast" && g.nodes.last?.outputs == ["next_state_feat_q"])
+    let concat = try #require(g.nodes.first { $0.op == "Concat" })
+    #expect(concat.inputs == ["state_feat_q__fp32", "x"] && concat.outputs == ["next_state_feat_q__fp32"])
+    #expect(g.nodes.first { $0.outputs == ["outputs"] }?.inputs == ["state_feat_q__fp32"])
+  }
+}
