@@ -80,13 +80,13 @@ public enum OrtProfile: String, CaseIterable, Sendable {
   /// the Hexagon NPU with finite attention masks, 8 that with constant
   /// attention masks as an added fp16 bias, 9 the Hexagon NPU's with the
   /// vision norms prescaled too, 10 with every norm in fp16-safe form, 11 back to
-  /// the prescaled native norms. An artifact prepared under
+  /// the prescaled native norms, 12 with GELU in its tanh form too. An artifact prepared under
   /// another rebuilds.
   public var prepareVersion: Int {
     switch layout {
     case .plain: 6
     case .aneWhole: 8
-    case .hexagonWhole: 11
+    case .hexagonWhole: 12
     case .split, .whole: 5
     }
   }

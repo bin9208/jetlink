@@ -185,6 +185,9 @@ public enum CoreMLPreparation {
       norms = try Patches.prescaleLayerNorm(&g)
       heads = try Patches.headsInFP32(&g, src)
       visionNorms = try Patches.prescaleVisionLayerNorm(&g)
+      // QNN's profile on a Snapdragon 8 Gen 2: N16's exact GELUs about 29%
+      // of the NPU's cycles
+      gelus = Patches.tanhGelu(&g)
     }
     if layout == .aneWhole || layout == .hexagonWhole {
       biasMasks = try Patches.additiveSoftmaxMasks(&g, src)
