@@ -299,12 +299,12 @@ jobs:
           # read only when the step above named the keystore
           JETLINK_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           JETLINK_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-        run: ./gradlew --no-daemon :app:assembleRelease -Pjetlink.prebuiltSwift="$GITHUB_WORKSPACE/swift-out"
+        run: ./gradlew --no-daemon :app:assembleStableRelease -Pjetlink.prebuiltSwift="$GITHUB_WORKSPACE/swift-out"
 
       - name: Check the APK's key
         run: |
           set -euo pipefail
-          APK=android/app/build/outputs/apk/release/app-release.apk
+          APK=android/app/build/outputs/apk/stable/release/app-stable-release.apk
           # the runner's newest build tools
           TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
           CERTS="$("$TOOLS/apksigner" verify --print-certs "$APK")"

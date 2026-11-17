@@ -100,6 +100,7 @@ fun RootScreen(graph: AppGraph, initialTab: String?, launchBenchmark: Int?) {
     }
     ScriptedBenchmark(graph, launchBenchmark)
     ShutdownAlert(status.snapshot.shutdownRequests)
+    UpdateAlert()
 
     Scaffold(
         containerColor = JetlinkTheme.colors.grouped,

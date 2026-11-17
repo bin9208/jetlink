@@ -130,3 +130,23 @@ import Testing
     #expect(probed.map(\.op) == [] || probed.map(\.op) == ["LayerNormalization"])
   }
 }
+
+@Suite struct TanhGeluTests {
+  @Test func anExactFp16GeluBecomesItsTanhFormAndKeepsItsOutput() throws {
+    var b = OnnxGraphBuilder(opset: 20)
+    b.input("x", DataType.float16, [1, 4])
+    b.valueInfo("x", DataType.float16, [1, 4])
+    b.node("Gelu", ["x"], ["y"])
+    b.input("f", DataType.float, [1, 4])
+    b.valueInfo("f", DataType.float, [1, 4])
+    b.node("Gelu", ["f"], ["z"])
+    b.output("y", DataType.float16, [1, 4])
+    b.output("z", DataType.float, [1, 4])
+    var g = b.graph
+    #expect(Patches.tanhGelu(&g) == 1)
+    #expect(g.nodes.filter { $0.op == "Gelu" }.map(\.outputs) == [["z"]])
+    #expect(g.nodes.contains { $0.op == "Tanh" } && g.nodes.contains { $0.op == "Clip" })
+    let last = try #require(g.nodes.first { $0.outputs == ["y"] })
+    #expect(last.op == "Mul" && last.displayName == Patches.tanhGeluOutput("y"))
+  }
+}

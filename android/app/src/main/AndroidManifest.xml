@@ -8,6 +8,8 @@
 
     <!-- The model catalog and downloads. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Jetlink Carrot updates itself from its GitHub releases (update/AppUpdate). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- One of the permissions a connectedDevice foreground service needs
          before the comma is plugged in. -->

@@ -23,7 +23,7 @@ val jetlinkVersionCode: Int =
         .let { (it.getOrElse(0) { 0 } * 10000) + (it.getOrElse(1) { 0 } * 100) + it.getOrElse(2) { 0 } }
 
 /** Jetlink Carrot's build of this upstream version (bin9208/jetlink releases). */
-val carrotBuild = 25
+val carrotBuild = 26
 
 android {
     namespace = "io.zoompilot.jetlink"
@@ -42,6 +42,7 @@ android {
         // earlier Carrot build must count higher.
         versionCode = jetlinkVersionCode * 100 + carrotBuild
         versionName = "$jetlinkVersion-carrot.$carrotBuild"
+        buildConfigField("int", "CARROT_BUILD", "$carrotBuild")
         // The QNN runtime is arm64 only, and so is every Snapdragon with an NPU
         // worth driving on. The emulator on an Apple silicon Mac is arm64 too.
         ndk { abiFilters += "arm64-v8a" }
@@ -78,6 +79,24 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    // Two apps from one source: the main one, released as full GitHub
+    // releases, and a test one beside it (its own package, its own models),
+    // released as pre-releases tagged -test. A change goes to test first and
+    // into main once tested; each app offers its own channel's updates.
+    flavorDimensions += "channel"
+    productFlavors {
+        create("stable") {
+            dimension = "channel"
+            buildConfigField("String", "CHANNEL", "\"stable\"")
+        }
+        create("beta") {
+            dimension = "channel"
+            applicationIdSuffix = ".test"
+            versionNameSuffix = "-test"
+            buildConfigField("String", "CHANNEL", "\"test\"")
+        }
     }
 
     packaging {

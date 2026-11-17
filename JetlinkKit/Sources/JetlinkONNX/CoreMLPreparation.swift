@@ -43,9 +43,9 @@ public enum CoreMLPreparation {
     /// (`--device ane-whole`): model.onnx, with the policy's norms prescaled
     /// and the vision heads in fp32.
     case aneWhole
-    /// `aneWhole` for a Snapdragon's Hexagon NPU (`htp-whole`), every norm
-    /// in its fp16-safe form (`safeLayerNorm`) instead of the policy's
-    /// prescale.
+    /// `aneWhole` for a Snapdragon's Hexagon NPU (`htp-whole`): the vision's
+    /// norms prescaled too (`prescaleVisionLayerNorm`) and GELU in its tanh
+    /// form (`tanhGelu`).
     case hexagonWhole
     /// One model for TensorRT or the CPU: model.onnx, tinygrad's ops
     /// stripped and the images fp16, nothing else changed.
@@ -82,7 +82,7 @@ public enum CoreMLPreparation {
     public static func == (a: Report, b: Report) -> Bool {
       a.stripped == b.stripped && a.retypedImages == b.retypedImages && a.gathers == b.gathers && a.gemms == b.gemms
         && a.tiles == b.tiles && a.norms == b.norms && a.heads == b.heads && a.masks == b.masks && a.parts == b.parts
-        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.safeNorms == b.safeNorms && a.probes.map(\.name) == b.probes.map(\.name)
+        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.safeNorms == b.safeNorms && a.gelus == b.gelus && a.probes.map(\.name) == b.probes.map(\.name)
     }
     /// tinygrad layout ops bypassed.
     public let stripped: Int
@@ -110,6 +110,9 @@ public enum CoreMLPreparation {
     /// LayerNormalizations in their fp16-safe form (`safeLayerNorm`); 0
     /// unless the layout is `.hexagonWhole`.
     public var safeNorms: Int = 0
+    /// Exact GELUs made their tanh form (`tanhGelu`); 0 unless the layout is
+    /// `.hexagonWhole`.
+    public var gelus: Int = 0
     /// The tensors made graph outputs for a probe, in graph order, with the
     /// op that writes each (`Patches.addProbes`); empty unless asked for.
     public var probes: [(name: String, op: String)] = []
@@ -170,13 +173,18 @@ public enum CoreMLPreparation {
     var biasMasks = 0
     var visionNorms = 0
     var safeNorms = 0
+    var gelus = 0
     if layout == .aneWhole {
       norms = try Patches.prescaleLayerNorm(&g)
       heads = try Patches.headsInFP32(&g, src)
     } else if layout == .hexagonWhole {
-      // every norm in its fp16-safe form instead of a fixed prescale
+      // the native norm, fed a scaled input: the policy's by 1/8, the vision's
+      // by 1/32 with its epsilon (carrot.15). The
+      // fp16-safe norms of carrot.23 were no more exact on the NPU and made a
+      // Snapdragon 8 Gen 2 run N16 in 55 ms instead of about 40.
+      norms = try Patches.prescaleLayerNorm(&g)
       heads = try Patches.headsInFP32(&g, src)
-      safeNorms = Patches.safeLayerNorm(&g)
+      visionNorms = try Patches.prescaleVisionLayerNorm(&g)
     }
     if layout == .aneWhole || layout == .hexagonWhole {
       biasMasks = try Patches.additiveSoftmaxMasks(&g, src)
@@ -208,6 +216,7 @@ public enum CoreMLPreparation {
     report.biasMasks = biasMasks
     report.visionNorms = visionNorms
     report.safeNorms = safeNorms
+    report.gelus = gelus
     report.probes = probed
     return report
   }

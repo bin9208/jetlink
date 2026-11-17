@@ -287,7 +287,7 @@ jobs:
 
       - name: Unit tests and the release APK
         working-directory: android
-        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease -Pjetlink.prebuiltSwift="$GITHUB_WORKSPACE/swift-out"
+        run: ./gradlew --no-daemon :app:testStableDebugUnitTest :app:assembleStableRelease -Pjetlink.prebuiltSwift="$GITHUB_WORKSPACE/swift-out"
         # The Kotlin tests parse the snapshot fixture the Swift suites write,
         # and check the gadget's IDs, the port and the onnxruntime release
         # against Pinned.swift.
@@ -295,7 +295,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Jetlink-android
-          path: android/app/build/outputs/apk/release/app-release.apk
+          path: android/app/build/outputs/apk/stable/release/app-stable-release.apk
           retention-days: 14
 
   app:

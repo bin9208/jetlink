@@ -550,6 +550,76 @@ enum Patches {
     return done
   }
 
+  // MARK: tanh_gelu
+
+  static func tanhGeluOutput(_ y: String) -> String { "\(y)__tanh_gelu" }
+
+  /// Rewrites every exact (erf) Gelu as its tanh form, in ops a Hexagon NPU
+  /// runs fast:
+  ///
+  ///     c = clip(x, -10, 10);  y = 0.5 x (1 + tanh(c (0.7978846 + 0.0356774 c^2)))
+  ///
+  /// The tanh form is within about 3e-4 of the exact one everywhere, and past
+  /// |x| = 10 both are x or 0 to fp16's precision, so the clip loses nothing
+  /// and keeps c^3 inside fp16. On a Snapdragon 8 Gen 2 QNN's profile of
+  /// carrot's N16 put its 11 policy GELUs ([1, 288, 2048]) at about 29% of
+  /// the NPU's cycles. Returns how many.
+  static func tanhGelu(_ g: inout Graph) -> Int {
+    var new: [Node] = []
+    new.reserveCapacity(g.nodes.count * 2)
+    var added: [Tensor] = []
+    var done = 0
+    var constants = false
+    func half(_ name: String, _ value: Float) {
+      let bits = Float16(value).bitPattern.littleEndian
+      added.append(
+        Tensor(name: name, dims: [], dataType: DataType.float16, raw: .owned([UInt8(truncatingIfNeeded: bits), UInt8(truncatingIfNeeded: bits >> 8)])))
+    }
+    let lo = "__tanh_gelu_lo", hi = "__tanh_gelu_hi", c1 = "__tanh_gelu_c1", c3 = "__tanh_gelu_c3", one = "__tanh_gelu_one",
+      halfName = "__tanh_gelu_half"
+    let types = staticTypes(g)
+    for node in g.nodes {
+      // fp16 exact Gelu only: an fp32 one keeps its precision as it is
+      guard node.op == "Gelu", node.inputs.count == 1, node.outputs.count == 1, (node.attribute("approximate")?.s ?? "none") == "none",
+        types[node.inputs[0]] == DataType.float16
+      else {
+        new.append(node)
+        continue
+      }
+      if !constants {
+        half(lo, -10)
+        half(hi, 10)
+        half(c1, 0.7978846)
+        half(c3, 0.0356774)
+        half(one, 1)
+        half(halfName, 0.5)
+        constants = true
+      }
+      let x = node.inputs[0]
+      let y = node.outputs[0]
+      let p = "\(y)__tg"
+      func n(_ op: String, _ inputs: [String], _ out: String) {
+        new.append(Node(inputs: inputs, outputs: [out], name: out, opType: op))
+      }
+      n("Clip", [x, lo, hi], "\(p)_c")
+      n("Mul", ["\(p)_c", "\(p)_c"], "\(p)_c2")
+      n("Mul", ["\(p)_c2", c3], "\(p)_k")
+      n("Add", ["\(p)_k", c1], "\(p)_s")
+      n("Mul", ["\(p)_c", "\(p)_s"], "\(p)_inner")
+      n("Tanh", ["\(p)_inner"], "\(p)_t")
+      n("Add", ["\(p)_t", one], "\(p)_t1")
+      n("Mul", [x, halfName], "\(p)_hx")
+      n("Mul", ["\(p)_hx", "\(p)_t1"], y)
+      new[new.count - 1].name = tanhGeluOutput(y)
+      done += 1
+    }
+    if done > 0 {
+      g.nodes = new
+      g.initializers.append(contentsOf: added)
+    }
+    return done
+  }
+
   // MARK: prescale_vision_layernorm
 
   /// How much `prescaleVisionLayerNorm` divides a vision norm's input by.
@@ -621,7 +691,9 @@ enum Patches {
     let wanted = request.names.map(Set.init)
     for n in g.nodes {
       // a norm in its fp16-safe form is still a norm here
-      let op = n.outputs.count == 1 && n.displayName == safeLayerNormOutput(n.outputs[0]) ? "LayerNormalization" : n.op
+      let op =
+        n.outputs.count == 1 && n.displayName == safeLayerNormOutput(n.outputs[0])
+        ? "LayerNormalization" : n.outputs.count == 1 && n.displayName == tanhGeluOutput(n.outputs[0]) ? "Gelu" : n.op
       for out in n.outputs where info[out] != nil && !outputs.contains(out) {
         if let wanted {
           if wanted.contains(out) { candidates.append((out, op)) }
