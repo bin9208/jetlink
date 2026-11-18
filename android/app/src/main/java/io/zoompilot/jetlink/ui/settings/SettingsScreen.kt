@@ -7,7 +7,9 @@ import kotlinx.coroutines.launch
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,6 +30,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -37,6 +40,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.graphics.asImageBitmap
+import io.zoompilot.jetlink.hud.HudRenderer
+import io.zoompilot.jetlink.hud.TurzxPacket
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -57,6 +65,7 @@ import io.zoompilot.jetlink.BuildConfig
 import io.zoompilot.jetlink.server.RunState
 import io.zoompilot.jetlink.server.ServerService
 import io.zoompilot.jetlink.server.Snapshot
+import io.zoompilot.jetlink.hud.HudState
 import io.zoompilot.jetlink.settings.Chip
 import io.zoompilot.jetlink.settings.Processor
 import io.zoompilot.jetlink.settings.SettingsValues
@@ -93,6 +102,8 @@ data class SettingsInfo(
     val automatic: Processor = Processor.Gpu,
     /** What runs the loaded model, when its engine says ("GPU(fp16)"). */
     val accelerator: String? = null,
+    /** The external HUD on the phone's USB. */
+    val hud: HudState = HudState.None,
 )
 
 /** What the Settings rows do. */
@@ -117,6 +128,7 @@ fun SettingsScreen(graph: AppGraph, openConnect: () -> Unit, openLogs: () -> Uni
     val snapshot by graph.server.snapshot.collectAsStateWithLifecycle()
     val runState by graph.server.runState.collectAsStateWithLifecycle()
     val usb by graph.usb.usb.collectAsStateWithLifecycle()
+    val hud by graph.hud.hud.collectAsStateWithLifecycle()
     val wifi = rememberWifiAddress()
     val runtime by produceState<String?>(null, runState) {
         value = withContext(Dispatchers.IO) { graph.server.runtimeVersion() }
@@ -133,6 +145,7 @@ fun SettingsScreen(graph: AppGraph, openConnect: () -> Unit, openLogs: () -> Uni
         snapdragon = Chip.isQualcomm || Chip.isEmulator,
         automatic = Chip.automatic,
         accelerator = snapshot.engine.takeIf { it.state == "ready" }?.accelerator,
+        hud = hud,
     )
     val actions = SettingsActions(
         update = graph.settings::update,
@@ -174,6 +187,7 @@ fun SettingsContent(values: SettingsValues, info: SettingsInfo, actions: Setting
         FormSection("Display", footer = { FormFooter("Jetlink keeps serving with the screen off.") }) {
             SwitchRow("Keep Screen On", values.keepScreenOn, { on -> actions.update { it.copy(keepScreenOn = on) } })
         }
+        Hud(values, info, actions)
         info.snapshot.disk?.let { disk ->
             FormSection("Storage") {
                 ValueRow("Downloaded", Format.bytes(disk.modelsBytes))
@@ -318,6 +332,91 @@ private fun Performance(values: SettingsValues, info: SettingsInfo, actions: Set
             "Keep CPU Awake", values.keepCpuAwake, { on -> actions.update { it.copy(keepCpuAwake = on) } },
             supporting = "Holds the CPU's clocks up between frames.",
         )
+    }
+}
+
+/**
+ * A TURZX panel on the phone's USB, through a powered hub beside the comma:
+ * Jetlink draws it, the comma does not. Only the switch starts or stops it;
+ * the rest apply while it runs.
+ */
+@Composable
+private fun Hud(values: SettingsValues, info: SettingsInfo, actions: SettingsActions) {
+    val colors = JetlinkTheme.colors
+    val hud = values.hud
+    val (status, bad) = when (val state = info.hud) {
+        HudState.None -> "연결 안 됨" to false
+        HudState.Off -> "꺼짐" to false
+        HudState.NeedsPermission -> "USB 허용 대기" to false
+        is HudState.Running ->
+            (if (state.fps > 0) "${state.name} · %.0f fps · %.0f ms".format(state.fps, state.sendMs) else state.name) to false
+        is HudState.Failed -> "오류: ${state.reason}" to true
+    }
+    val footer = "시험 기능입니다. 켜면 동작 기록이 로그에 남으니, 문제가 있으면 Help → Logs에서 로그를 보내 주세요. " +
+        "전원이 들어가는 USB 허브를 폰/태블릿에 꽂고, 허브에 코마와 TURZX를 함께 연결하세요. " +
+        "지금은 Jetlink 상태(시간, 코마 연결, 모델, 추론 속도)를 표시하고, 주행 화면은 코마 쪽 지원 후 표시됩니다. " +
+        "화면이 뒤집혀 보이면 180° 회전을, 좌우가 바뀌어 보이면 좌우 반전을 켜세요."
+    FormSection("외부 HUD (TURZX) · 시험 기능", footer = { FormFooter(footer) }) {
+        ValueRow("상태", status, valueColor = if (bad) colors.bad else null)
+        RowDivider()
+        SwitchRow(
+            "HUD 사용 (시험)", hud.enabled, { on -> actions.update { it.copy(hud = it.hud.copy(enabled = on)) } },
+            supporting = "허브로 연결한 TURZX에 Jetlink가 직접 화면을 보냅니다",
+        )
+        if (hud.enabled) {
+            RowDivider()
+            var brightness by remember(hud.brightness) { mutableStateOf(hud.brightness.toFloat()) }
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("밝기", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                    Text("${brightness.toInt()}%", style = MaterialTheme.typography.bodyLarge, color = colors.secondaryText)
+                }
+                Slider(
+                    value = brightness,
+                    onValueChange = { brightness = it },
+                    onValueChangeFinished = { actions.update { it.copy(hud = it.hud.copy(brightness = brightness.toInt())) } },
+                    valueRange = 10f..100f,
+                    steps = 8,
+                )
+            }
+            RowDivider()
+            SwitchRow("180° 회전", hud.rotate180, { on -> actions.update { it.copy(hud = it.hud.copy(rotate180 = on)) } })
+            RowDivider()
+            SwitchRow(
+                "좌우 반전", hud.mirror, { on -> actions.update { it.copy(hud = it.hud.copy(mirror = on)) } },
+                supporting = "앞유리에 반사해서 볼 때",
+            )
+            RowDivider()
+            HudPreview(info.snapshot, hud.mirror)
+        }
+    }
+}
+
+/**
+ * The 9.2-inch panel's picture without a panel: a frame made exactly as the
+ * HUD sends it (drawn, turned, JPEG), turned back. Once a second while shown.
+ */
+@Composable
+private fun HudPreview(snapshot: Snapshot, mirror: Boolean) {
+    val current by rememberUpdatedState(snapshot)
+    val frame by produceState<android.graphics.Bitmap?>(null, mirror) {
+        val size = TurzxPacket.size(0x92)!!
+        val renderer = HudRenderer(size)
+        while (true) {
+            value = withContext(Dispatchers.Default) {
+                HudRenderer.preview(renderer.render(current, java.time.LocalDateTime.now(), mirror))
+            }
+            delay(1000)
+        }
+    }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+        Text("미리보기 (9.2\")", style = MaterialTheme.typography.bodyLarge)
+        frame?.let {
+            Image(
+                it.asImageBitmap(), contentDescription = "HUD 미리보기",
+                modifier = Modifier.fillMaxWidth().aspectRatio(1920f / 462f).padding(top = 8.dp),
+            )
+        }
     }
 }
 

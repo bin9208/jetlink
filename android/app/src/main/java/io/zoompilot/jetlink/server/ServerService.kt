@@ -20,6 +20,8 @@ import androidx.lifecycle.lifecycleScope
 import io.zoompilot.jetlink.MainActivity
 import io.zoompilot.jetlink.R
 import io.zoompilot.jetlink.graph
+import io.zoompilot.jetlink.hud.TurzxHud
+import io.zoompilot.jetlink.settings.HudSettings
 import io.zoompilot.jetlink.settings.SettingsValues
 import io.zoompilot.jetlink.ui.status.StatusState
 import io.zoompilot.jetlink.usb.CommaUsb
@@ -49,9 +51,17 @@ class ServerService : LifecycleService() {
             graph.scope.launch(Dispatchers.IO) {
                 try {
                     when (intent.action) {
-                        UsbManager.ACTION_USB_DEVICE_ATTACHED, CommaUsb.ACTION_PERMISSION -> graph.usb.connect()
-                        UsbManager.ACTION_USB_DEVICE_DETACHED ->
-                            graph.usb.detached(IntentCompat.getParcelableExtra(intent, UsbManager.EXTRA_DEVICE, UsbDevice::class.java))
+                        UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                            graph.usb.connect()
+                            graph.hud.connect()
+                        }
+                        CommaUsb.ACTION_PERMISSION -> graph.usb.connect()
+                        TurzxHud.ACTION_PERMISSION -> graph.hud.connect()
+                        UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                            val device = IntentCompat.getParcelableExtra(intent, UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                            graph.usb.detached(device)
+                            graph.hud.detached(device)
+                        }
                     }
                 } finally {
                     pending.finish()
@@ -68,6 +78,7 @@ class ServerService : LifecycleService() {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
             addAction(CommaUsb.ACTION_PERMISSION)
+            addAction(TurzxHud.ACTION_PERMISSION)
         }
         ContextCompat.registerReceiver(this, usbEvents, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
 
@@ -76,6 +87,12 @@ class ServerService : LifecycleService() {
             graph.settings.values.map(::serverSettings).distinctUntilChanged().collectLatest {
                 graph.server.start(graph.settings.values.value)
                 withContext(Dispatchers.IO) { graph.usb.connect() }
+            }
+        }
+        // the external HUD follows its own switch; its other settings apply while it runs
+        lifecycleScope.launch {
+            graph.settings.values.map { it.hud.enabled }.distinctUntilChanged().collectLatest {
+                withContext(Dispatchers.IO) { graph.hud.connect() }
             }
         }
         lifecycleScope.launch {
@@ -96,7 +113,10 @@ class ServerService : LifecycleService() {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
-            ACTION_USB -> graph.scope.launch(Dispatchers.IO) { graph.usb.connect() }
+            ACTION_USB -> graph.scope.launch(Dispatchers.IO) {
+                graph.usb.connect()
+                graph.hud.connect()
+            }
         }
         return START_STICKY
     }
@@ -105,6 +125,7 @@ class ServerService : LifecycleService() {
         unregisterReceiver(usbEvents)
         holdWakeLock(false)
         graph.scope.launch(Dispatchers.IO) {
+            graph.hud.stop()
             graph.usb.disconnect()
             graph.server.stop()
         }
@@ -161,7 +182,7 @@ class ServerService : LifecycleService() {
             ContextCompat.startForegroundService(context, Intent(context, ServerService::class.java).setAction(action))
         }
 
-        /** The settings the server runs with; the screen's own do not restart it. */
-        private fun serverSettings(values: SettingsValues) = values.copy(keepScreenOn = false)
+        /** The settings the server runs with; the screen's and the HUD's do not restart it. */
+        private fun serverSettings(values: SettingsValues) = values.copy(keepScreenOn = false, hud = HudSettings())
     }
 }

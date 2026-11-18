@@ -3,6 +3,7 @@ package io.zoompilot.jetlink
 import android.app.Application
 import android.content.Context
 import io.zoompilot.jetlink.device.DeviceMonitor
+import io.zoompilot.jetlink.hud.TurzxHud
 import io.zoompilot.jetlink.server.RunState
 import io.zoompilot.jetlink.server.ServerController
 import io.zoompilot.jetlink.server.ServerService
@@ -30,6 +31,7 @@ class AppGraph(context: Context) {
     val server = ServerController(context, scope)
     val usb = CommaUsb(context)
     val device = DeviceMonitor(context, scope)
+    val hud = TurzxHud(context, server.snapshot) { settings.values.value.hud }
 
     /**
      * Starts the server again with the current settings and hands it the

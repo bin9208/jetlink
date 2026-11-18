@@ -134,6 +134,23 @@ data class SettingsValues(
      * emulator, with no USB host, starts with it on.
      */
     val developer: Boolean = false,
+    /** A TURZX panel on the phone's USB, through a hub beside the comma. Never restarts the server. */
+    val hud: HudSettings = HudSettings(),
+)
+
+/** The external HUD (TURZX) on the phone's USB: the comma's ClusterHud settings, here. */
+data class HudSettings(
+    /**
+     * Drive a TURZX panel when one is plugged in. A trial feature, off until
+     * the owner turns it on; it stays a switch once it is settled.
+     */
+    val enabled: Boolean = false,
+    /** 0 to 100, ClusterHudBrightness's fixed values. */
+    val brightness: Int = 80,
+    /** ClusterHudOrientation 2: the panel turned 180 degrees. */
+    val rotate180: Boolean = false,
+    /** ClusterHudMirror 1: left and right swapped, for a reflection in the windshield. */
+    val mirror: Boolean = false,
 )
 
 class Settings(context: Context) {
@@ -150,6 +167,10 @@ class Settings(context: Context) {
             .putBoolean(KEEP_CPU_AWAKE, next.keepCpuAwake)
             .putBoolean(KEEP_SCREEN_ON, next.keepScreenOn)
             .putBoolean(DEVELOPER, next.developer)
+            .putBoolean(HUD_ENABLED, next.hud.enabled)
+            .putInt(HUD_BRIGHTNESS, next.hud.brightness)
+            .putBoolean(HUD_ROTATE_180, next.hud.rotate180)
+            .putBoolean(HUD_MIRROR, next.hud.mirror)
             .apply()
         state.value = next
     }
@@ -167,6 +188,12 @@ class Settings(context: Context) {
             keepCpuAwake = prefs.getBoolean(KEEP_CPU_AWAKE, defaults.keepCpuAwake),
             keepScreenOn = prefs.getBoolean(KEEP_SCREEN_ON, defaults.keepScreenOn),
             developer = prefs.getBoolean(DEVELOPER, Chip.isEmulator),
+            hud = HudSettings(
+                enabled = prefs.getBoolean(HUD_ENABLED, defaults.hud.enabled),
+                brightness = prefs.getInt(HUD_BRIGHTNESS, defaults.hud.brightness).coerceIn(0, 100),
+                rotate180 = prefs.getBoolean(HUD_ROTATE_180, defaults.hud.rotate180),
+                mirror = prefs.getBoolean(HUD_MIRROR, defaults.hud.mirror),
+            ),
         )
     }
 
@@ -178,6 +205,10 @@ class Settings(context: Context) {
         private const val KEEP_CPU_AWAKE = "keepCpuAwake"
         private const val KEEP_SCREEN_ON = "keepScreenOn"
         private const val DEVELOPER = "developer"
+        private const val HUD_ENABLED = "hudEnabled"
+        private const val HUD_BRIGHTNESS = "hudBrightness"
+        private const val HUD_ROTATE_180 = "hudRotate180"
+        private const val HUD_MIRROR = "hudMirror"
 
         /** Settings from before Automatic are version 1. */
         private const val CURRENT = 2
