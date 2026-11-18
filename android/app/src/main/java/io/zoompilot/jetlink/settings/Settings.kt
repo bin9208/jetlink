@@ -146,8 +146,11 @@ data class SettingsValues(
 
 /** The external HUD (TURZX) on the phone's USB: the comma's ClusterHud settings, here. */
 data class HudSettings(
-    /** Drive a TURZX panel when one is plugged in. */
-    val enabled: Boolean = true,
+    /**
+     * Drive a TURZX panel when one is plugged in. A trial feature, off until
+     * the owner turns it on; it stays a switch once it is settled.
+     */
+    val enabled: Boolean = false,
     /** 0 to 100, ClusterHudBrightness's fixed values. */
     val brightness: Int = 80,
     /** ClusterHudOrientation 2: the panel turned 180 degrees. */

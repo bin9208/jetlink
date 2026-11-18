@@ -372,13 +372,17 @@ private fun Hud(values: SettingsValues, info: SettingsInfo, actions: SettingsAct
             (if (state.fps > 0) "${state.name} · %.0f fps · %.0f ms".format(state.fps, state.sendMs) else state.name) to false
         is HudState.Failed -> "오류: ${state.reason}" to true
     }
-    val footer = "전원이 들어가는 USB 허브를 폰/태블릿에 꽂고, 허브에 코마와 TURZX를 함께 연결하세요. " +
+    val footer = "시험 기능입니다. 켜면 동작 기록이 로그에 남으니, 문제가 있으면 Help → Logs에서 로그를 보내 주세요. " +
+        "전원이 들어가는 USB 허브를 폰/태블릿에 꽂고, 허브에 코마와 TURZX를 함께 연결하세요. " +
         "지금은 Jetlink 상태(시간, 코마 연결, 모델, 추론 속도)를 표시하고, 주행 화면은 코마 쪽 지원 후 표시됩니다. " +
         "화면이 뒤집혀 보이면 180° 회전을, 좌우가 바뀌어 보이면 좌우 반전을 켜세요."
-    FormSection("외부 HUD (TURZX)", footer = { FormFooter(footer) }) {
+    FormSection("외부 HUD (TURZX) · 시험 기능", footer = { FormFooter(footer) }) {
         ValueRow("상태", status, valueColor = if (bad) colors.bad else null)
         RowDivider()
-        SwitchRow("HUD 사용", hud.enabled, { on -> actions.update { it.copy(hud = it.hud.copy(enabled = on)) } })
+        SwitchRow(
+            "HUD 사용 (시험)", hud.enabled, { on -> actions.update { it.copy(hud = it.hud.copy(enabled = on)) } },
+            supporting = "허브로 연결한 TURZX에 Jetlink가 직접 화면을 보냅니다",
+        )
         if (hud.enabled) {
             RowDivider()
             var brightness by remember(hud.brightness) { mutableStateOf(hud.brightness.toFloat()) }
