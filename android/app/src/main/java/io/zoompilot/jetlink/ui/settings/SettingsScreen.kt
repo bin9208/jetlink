@@ -7,7 +7,9 @@ import kotlinx.coroutines.launch
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -38,6 +40,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.graphics.asImageBitmap
+import io.zoompilot.jetlink.hud.HudRenderer
+import io.zoompilot.jetlink.hud.TurzxPacket
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -361,7 +368,8 @@ private fun Hud(values: SettingsValues, info: SettingsInfo, actions: SettingsAct
         HudState.None -> "연결 안 됨" to false
         HudState.Off -> "꺼짐" to false
         HudState.NeedsPermission -> "USB 허용 대기" to false
-        is HudState.Running -> (if (state.fps > 0) "${state.name} · %.0f fps".format(state.fps) else state.name) to false
+        is HudState.Running ->
+            (if (state.fps > 0) "${state.name} · %.0f fps · %.0f ms".format(state.fps, state.sendMs) else state.name) to false
         is HudState.Failed -> "오류: ${state.reason}" to true
     }
     val footer = "전원이 들어가는 USB 허브를 폰/태블릿에 꽂고, 허브에 코마와 TURZX를 함께 연결하세요. " +
@@ -393,6 +401,36 @@ private fun Hud(values: SettingsValues, info: SettingsInfo, actions: SettingsAct
             SwitchRow(
                 "좌우 반전", hud.mirror, { on -> actions.update { it.copy(hud = it.hud.copy(mirror = on)) } },
                 supporting = "앞유리에 반사해서 볼 때",
+            )
+            RowDivider()
+            HudPreview(info.snapshot, hud.mirror)
+        }
+    }
+}
+
+/**
+ * The 9.2-inch panel's picture without a panel: a frame made exactly as the
+ * HUD sends it (drawn, turned, JPEG), turned back. Once a second while shown.
+ */
+@Composable
+private fun HudPreview(snapshot: Snapshot, mirror: Boolean) {
+    val current by rememberUpdatedState(snapshot)
+    val frame by produceState<android.graphics.Bitmap?>(null, mirror) {
+        val size = TurzxPacket.size(0x92)!!
+        val renderer = HudRenderer(size)
+        while (true) {
+            value = withContext(Dispatchers.Default) {
+                HudRenderer.preview(renderer.render(current, java.time.LocalDateTime.now(), mirror))
+            }
+            delay(1000)
+        }
+    }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+        Text("미리보기 (9.2\")", style = MaterialTheme.typography.bodyLarge)
+        frame?.let {
+            Image(
+                it.asImageBitmap(), contentDescription = "HUD 미리보기",
+                modifier = Modifier.fillMaxWidth().aspectRatio(1920f / 462f).padding(top = 8.dp),
             )
         }
     }

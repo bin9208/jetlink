@@ -3,7 +3,7 @@ package io.zoompilot.jetlink.hud
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Matrix
+import android.graphics.BitmapFactory
 import android.graphics.Paint
 import android.graphics.Typeface
 import io.zoompilot.jetlink.server.Snapshot
@@ -19,17 +19,17 @@ import kotlin.math.roundToInt
  * status: the time, the comma's link, the model and how fast it runs.
  *
  * Drawn landscape, [size] as the comma's renderer sees the panel, then
- * turned 90 degrees counterclockwise into the panel's portrait frame, as the
- * comma's portrait upload does (renderer/output.rs, rotation -90). The panel's
- * own 180-degree setting and the mirror cover a panel mounted the other way.
+ * turned into the panel's portrait frame exactly as the comma's upload ends
+ * up ([Portrait]). The panel's own 180-degree setting and the mirror cover a
+ * panel mounted the other way.
  */
 class HudRenderer(private val size: TurzxPacket.Size) {
     private val landscape = Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888)
     private val portrait = Bitmap.createBitmap(size.height, size.width, Bitmap.Config.ARGB_8888)
     private val canvas = Canvas(landscape)
-    private val portraitCanvas = Canvas(portrait)
     private val jpeg = ByteArrayOutputStream(256 * 1024)
-    private val upload = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val landscapePixels = IntArray(size.width * size.height)
+    private val portraitPixels = IntArray(size.width * size.height)
 
     private val h = size.height.toFloat()
     private val w = size.width.toFloat()
@@ -41,13 +41,9 @@ class HudRenderer(private val size: TurzxPacket.Size) {
     /** The frame for [snapshot] at [now], as JPEG bytes in the panel's orientation. */
     fun render(snapshot: Snapshot, now: LocalDateTime, mirror: Boolean, quality: Int = JPEG_QUALITY): ByteArray {
         draw(snapshot, now)
-        val matrix = Matrix().apply {
-            if (mirror) postScale(-1f, 1f, w / 2f, 0f)
-            postRotate(-90f)
-            postTranslate(0f, w)
-        }
-        portraitCanvas.drawColor(BACKGROUND)
-        portraitCanvas.drawBitmap(landscape, matrix, upload)
+        landscape.getPixels(landscapePixels, 0, size.width, 0, 0, size.width, size.height)
+        Portrait.rotate(landscapePixels, size.width, size.height, mirror, portraitPixels)
+        portrait.setPixels(portraitPixels, 0, size.height, 0, 0, size.height, size.width)
         jpeg.reset()
         portrait.compress(Bitmap.CompressFormat.JPEG, quality, jpeg)
         return jpeg.toByteArray()
@@ -113,6 +109,21 @@ class HudRenderer(private val size: TurzxPacket.Size) {
     }
 
     companion object {
+        /**
+         * What a panel shows for [jpeg], a frame [render] made: decoded and
+         * turned back to landscape, for the Settings preview without a panel.
+         */
+        fun preview(jpeg: ByteArray): Bitmap? {
+            val frame = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: return null
+            val height = frame.width
+            val width = frame.height
+            val portraitPixels = IntArray(width * height)
+            frame.getPixels(portraitPixels, 0, height, 0, 0, height, width)
+            val pixels = IntArray(width * height)
+            Portrait.unrotate(portraitPixels, width, height, pixels)
+            return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+        }
+
         /** The comma's --usb-jpeg-quality default. */
         const val JPEG_QUALITY = 68
 

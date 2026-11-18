@@ -27,7 +27,8 @@ sealed interface HudState {
     /** A panel is plugged in, and Android has not let Jetlink use it yet. */
     data object NeedsPermission : HudState
 
-    data class Running(val name: String, val fps: Double) : HudState
+    /** [sendMs]: a frame's USB write, on average over the last five seconds. */
+    data class Running(val name: String, val fps: Double, val sendMs: Double = 0.0) : HudState
 
     data class Failed(val reason: String) : HudState
 }
@@ -66,11 +67,13 @@ class TurzxHud(
             }
             worker?.let { it.device.deviceName == device.deviceName && it.isAlive } == true -> Unit
             !manager.hasPermission(device) -> {
+                Log.i(TAG, "HUD found ${TurzxPacket.name(device.productId)} at ${device.deviceName}; asking for USB permission")
                 hudState.value = HudState.NeedsPermission
                 requestPermission(device)
             }
             else -> {
                 stop()
+                Log.i(TAG, "HUD starting on ${TurzxPacket.name(device.productId)} at ${device.deviceName}")
                 worker = Worker(device).also { it.start() }
             }
         }
@@ -150,9 +153,12 @@ class TurzxHud(
                 display.initialize(applied.brightness, applied.rotate180)
                 val renderer = HudRenderer(display.size)
                 val name = TurzxPacket.name(display.product)
-                Log.i(TAG, "HUD on $name ${display.size.width}x${display.size.height}")
+                Log.i(TAG, "HUD on $name ${display.size.width}x${display.size.height} (${device.deviceName}), initialized")
                 hudState.value = HudState.Running(name, 0.0)
                 var frames = 0
+                var renderNs = 0L
+                var sendNs = 0L
+                var bytes = 0L
                 var since = SystemClock.elapsedRealtime()
                 while (running) {
                     val started = SystemClock.elapsedRealtime()
@@ -160,13 +166,32 @@ class TurzxHud(
                     if (wanted.brightness != applied.brightness) display.setBrightness(wanted.brightness)
                     if (wanted.rotate180 != applied.rotate180) display.setOrientation(wanted.rotate180)
                     applied = wanted
-                    display.sendJpeg(renderer.render(snapshot.value, LocalDateTime.now(), wanted.mirror))
+                    val t0 = System.nanoTime()
+                    val jpeg = renderer.render(snapshot.value, LocalDateTime.now(), wanted.mirror)
+                    val t1 = System.nanoTime()
+                    display.sendJpeg(jpeg)
+                    val t2 = System.nanoTime()
+                    if (!delivered) Log.i(TAG, "HUD first frame sent: ${jpeg.size} bytes in ${(t2 - t1) / 1_000_000} ms")
                     frames += 1
+                    renderNs += t1 - t0
+                    sendNs += t2 - t1
+                    bytes += jpeg.size
                     delivered = true
                     val now = SystemClock.elapsedRealtime()
                     if (now - since >= 5000) {
-                        hudState.value = HudState.Running(name, frames * 1000.0 / (now - since))
+                        val fps = frames * 1000.0 / (now - since)
+                        val send = sendNs / 1e6 / frames
+                        hudState.value = HudState.Running(name, fps, send)
+                        Log.i(
+                            TAG,
+                            "HUD %.1f fps, render %.1f ms, send %.1f ms, %d KB a frame".format(
+                                fps, renderNs / 1e6 / frames, send, bytes / frames / 1024,
+                            ),
+                        )
                         frames = 0
+                        renderNs = 0
+                        sendNs = 0
+                        bytes = 0
                         since = now
                     }
                     val rest = FRAME_MS - (SystemClock.elapsedRealtime() - started)
