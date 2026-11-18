@@ -4,4 +4,7 @@
      pid.codes' test pair, so the strings keep other test gadgets out. -->
 <resources>
     <usb-device vendor-id="4617" product-id="1" manufacturer-name="zoompilot" product-name="jetlink" />
+    <!-- A TURZX panel (1cbe:0092 9.2-inch, 1cbe:0123 12.3-inch) for the external HUD (hud/TurzxHud). -->
+    <usb-device vendor-id="7358" product-id="146" />
+    <usb-device vendor-id="7358" product-id="291" />
 </resources>
