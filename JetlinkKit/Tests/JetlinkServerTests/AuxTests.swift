@@ -121,4 +121,41 @@ import Testing
       #expect((json["detail"] as? String)?.contains("serious") == true)
     }
   }
+
+  @Test("A benchmark runs the auxiliary models from the cache beside the driving model, and skips one it cannot get")
+  func benchmarksBesideTheDrivingModel() throws {
+    let golden = try Golden("tiny_queued")
+    let bytes = try Data(contentsOf: Self.model)
+    let nowhere = "http://127.0.0.1:9/none.onnx"
+    let tiny = AuxBenchmarkModel(name: "tiny", sha256: Self.sha, bytes: Int64(bytes.count), url: nowhere, interval: 0.1, perRound: 2)
+    let missing = AuxBenchmarkModel(
+      name: "missing", sha256: String(repeating: "0", count: 64), bytes: 10, url: nowhere, interval: 0.1, perRound: 1)
+    try serve(hooks: ServerHooks(auxBenchmark: [tiny, missing])) { server, client in
+      _ = try client.ensureEngine(model: golden.model, sha256: golden.sha256)
+      client.close()
+      let deadline = Date().addingTimeInterval(5)
+      while server.host.lock.withLock({ server.host.session != nil }) && Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.02)
+      }
+      // as a comma's upload leaves it
+      let directory = server.host.cache.layout.root.appending(path: "aux", directoryHint: .isDirectory)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      try bytes.write(to: directory.appending(path: "\(Self.sha).onnx"))
+
+      let report = try server.host.benchmark(seconds: 2, run: BenchmarkRun())
+      #expect(!report.cancelled)
+      // again, to read its lines: the model is loaded now
+      let l = try #require(server.host.lock.withLock { server.host.loaded })
+      let lines = try server.host.auxBenchmark(l, seconds: 1, alone: report, cpuAlone: 0.5, run: BenchmarkRun())
+      #expect(lines.contains("aux: tiny on CPU, loaded"), "\(lines)")
+      #expect(lines.contains { $0.hasPrefix("aux: missing not run:") }, "\(lines)")
+      let line = try #require(lines.first { $0.hasPrefix("aux: tiny on CPU: ") })
+      let done = Int(line.split(separator: " ")[4]) ?? 0
+      #expect(done >= 5, "\(line)")
+      #expect(!line.contains("refused"), "\(line)")
+      #expect(lines.contains { $0.hasPrefix("aux: driving frames alone p50 ") })
+      #expect(lines.contains { $0.hasPrefix("aux: process CPU ") })
+      #expect(lines.last == "aux: verdict: not yet, tiny on the CPU", "\(lines)")
+    }
+  }
 }

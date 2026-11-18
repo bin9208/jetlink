@@ -33,6 +33,10 @@ public struct ServerHooks: Sendable {
   /// After a frame answered INFER_FAILED for an error the backend marks fatal
   /// (`FatalEngineError`): the daemon exits 3 and systemd restarts it.
   public var fatal: (@Sendable (any Error) -> Void)?
+  /// The auxiliary camera models a benchmark runs beside the driving model,
+  /// as a comma would send them (`AuxBenchmarkModel.carrot`); none, it runs
+  /// the driving model alone.
+  public var auxBenchmark: [AuxBenchmarkModel]
 
   public init(
     telemetry: @escaping @Sendable () -> [String: Any] = { [:] },
@@ -40,7 +44,8 @@ public struct ServerHooks: Sendable {
     sleepAfter: Double = 0,
     gadgetIdle: (@Sendable (GadgetIdleEvent) -> Bool)? = nil,
     shutdown: (@Sendable (_ reason: String) -> (@Sendable () -> Void)?)? = nil,
-    fatal: (@Sendable (any Error) -> Void)? = nil
+    fatal: (@Sendable (any Error) -> Void)? = nil,
+    auxBenchmark: [AuxBenchmarkModel] = []
   ) {
     self.telemetry = telemetry
     self.thermal = thermal
@@ -48,5 +53,6 @@ public struct ServerHooks: Sendable {
     self.gadgetIdle = gadgetIdle
     self.shutdown = shutdown
     self.fatal = fatal
+    self.auxBenchmark = auxBenchmark
   }
 }
