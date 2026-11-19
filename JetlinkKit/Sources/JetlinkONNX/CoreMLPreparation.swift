@@ -70,8 +70,16 @@ public enum CoreMLPreparation {
   /// What a test build may try on the Hexagon NPU beyond what it ships,
   /// each measured against the rest (the test app's experiment sweep).
   public enum Experiment: String, CaseIterable, Sendable, Comparable {
-    /// Big weights as int8 with a DequantizeLinear (`int8Weights`).
+    /// Big weights as int8 with a DequantizeLinear (`int8Weights`). Not in
+    /// the sweep: N16 583 ms a run on a Galaxy Tab S9 (carrot.41).
     case int8
+    /// The vision norms without their 1/32 (`prescaleVisionLayerNorm`), the
+    /// fix an 8 Elite (v79) needed; an 8 Gen 2 (v73) ran N16 right without
+    /// it, and its Muls were about 9% of the NPU's cycles (carrot.47).
+    case noVisionPrescale = "no-vision-prescale"
+    /// The 1/32 in the convolution's weight and bias where a vision norm
+    /// takes a convolution's output, rather than a Mul before the norm.
+    case foldVisionPrescale = "fold-vision-prescale"
 
     public static func < (a: Experiment, b: Experiment) -> Bool { a.rawValue < b.rawValue }
 
@@ -80,9 +88,13 @@ public enum CoreMLPreparation {
       set.isEmpty ? "none" : set.sorted().map(\.rawValue).joined(separator: "+")
     }
 
-    /// Every combination, the empty one first.
+    /// What the test app's sweep tries.
+    public static let swept: [Experiment] = [.noVisionPrescale, .foldVisionPrescale]
+
+    /// None, then each swept experiment alone: the two prescale ones are
+    /// alternatives (with no norm prescaled the fold has nothing to fold).
     public static var combinations: [Set<Experiment>] {
-      allCases.reduce([[]]) { sets, e in sets + sets.map { $0.union([e]) } }
+      [[]] + swept.map { [$0] }
     }
   }
 
@@ -216,7 +228,9 @@ public enum CoreMLPreparation {
       // Snapdragon 8 Gen 2 run N16 in 55 ms instead of about 40.
       norms = try Patches.prescaleLayerNorm(&g)
       heads = try Patches.headsInFP32(&g, src)
-      visionNorms = try Patches.prescaleVisionLayerNorm(&g)
+      if !experiments.contains(.noVisionPrescale) {
+        visionNorms = try Patches.prescaleVisionLayerNorm(&g, src, fold: experiments.contains(.foldVisionPrescale))
+      }
       stateIO = Patches.fp16StateIO(&g)
       // Not Patches.tanhGelu: QNN runs the native Gelu well. On a Snapdragon
       // 8 Gen 2 the tanh form took Light Speed 2 from 84 M NPU cycles a run

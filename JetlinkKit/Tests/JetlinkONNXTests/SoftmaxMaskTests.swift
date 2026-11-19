@@ -106,6 +106,56 @@ import Testing
     // and once is enough
     #expect(try Patches.prescaleVisionLayerNorm(&g) == 0)
   }
+
+  @Test("Folded, a norm after a convolution takes the 1/32 in the convolution's weight and bias; any other keeps its Mul")
+  func foldsTheDivisionIntoTheConvolution() throws {
+    var b = OnnxGraphBuilder()
+    b.input("x", DataType.float16, [1, 2, 3, 3])
+    b.fp16("w", [2, 1, 1, 1], [64, -0.5])
+    b.fp16("cb", [2], [32, 1])
+    b.node("Conv", ["x", "w", "cb"], ["c"], [.int("group", 2)])
+    b.node("Transpose", ["c"], ["t"], [.ints("perm", [0, 2, 3, 1])])
+    b.valueInfo("t", DataType.float16, [1, 3, 3, 2])
+    b.fp16("s", [2], [1, 1])
+    b.fp16("z", [2], [0, 0])
+    b.node("LayerNormalization", ["t", "s", "z"], ["y"], [.floatValue("epsilon", 1e-5), .int("axis", -1)])
+    // a norm whose input is no convolution's keeps its Mul
+    b.input("u", DataType.float16, [1, 4, 2])
+    b.valueInfo("u", DataType.float16, [1, 4, 2])
+    b.node("LayerNormalization", ["u", "s", "z"], ["v"], [.floatValue("epsilon", 1e-5), .int("axis", -1)])
+    b.output("y", DataType.float16, [1, 3, 3, 2])
+    b.output("v", DataType.float16, [1, 4, 2])
+    var g = b.graph
+    #expect(try Patches.prescaleVisionLayerNorm(&g, none, fold: true) == 2)
+
+    let conv = try #require(g.nodes.first { $0.op == "Conv" })
+    #expect(conv.inputs[1].hasSuffix("__vision_div_32") && conv.inputs[2].hasSuffix("__vision_div_32"))
+    func values(_ name: String) throws -> [Float] {
+      let t = try #require(g.initializers.first { $0.key == name })
+      return try Elements.floats(Elements.littleEndian(t, none), as: t.elementType, for: name)
+    }
+    #expect(try values(conv.inputs[1]) == [2, -0.015625])
+    #expect(try values(conv.inputs[2]) == [1, 0.03125])
+    let norms = g.nodes.filter { $0.op == "LayerNormalization" }
+    #expect(norms[0].inputs[0] == "t")
+    #expect(abs(try #require(norms[0].attribute("epsilon")?.f) - 1e-5 / 1024) < 1e-12)
+    #expect(norms[1].inputs[0] == "u__vision_scaled")
+    #expect(g.nodes.filter { $0.op == "Mul" }.count == 1)
+    // the weights the copies replaced are gone
+    #expect(!g.initializers.contains { $0.key == "w" || $0.key == "cb" })
+
+    // and once is enough: neither the fold nor a Mul again
+    #expect(try Patches.prescaleVisionLayerNorm(&g, none, fold: true) == 0)
+    #expect(g.nodes.filter { $0.op == "Mul" }.count == 1)
+    #expect(try values(conv.inputs[1]) == [2, -0.015625])
+  }
+
+  @Test("The sweep tries none and each prescale experiment alone, never int8")
+  func sweepsThePrescaleExperiments() {
+    let sets = CoreMLPreparation.Experiment.combinations
+    #expect(sets == [[], [.noVisionPrescale], [.foldVisionPrescale]])
+    #expect(CoreMLPreparation.Experiment.name([.foldVisionPrescale]) == "fold-vision-prescale")
+  }
 }
 
 @Suite struct SafeLayerNormTests {

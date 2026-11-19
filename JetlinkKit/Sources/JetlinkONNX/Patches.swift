@@ -795,21 +795,94 @@ enum Patches {
   /// were metres from the CPU's on the same frames. Divided by 32 the worst
   /// sum is about 4000. LayerNorm(x / k) with epsilon / k² is LayerNorm(x)
   /// with epsilon exactly.
-  static func prescaleVisionLayerNorm(_ g: inout Graph, k: Float = visionLayerNormPrescale) throws -> Int {
+  ///
+  /// With `fold` (and `src` to read weights from), a norm whose input is a
+  /// convolution's output alone, through a Transpose (N16's ConvNeXt blocks:
+  /// Conv -> Transpose -> LayerNorm), takes the 1/k in that convolution's
+  /// weight and bias instead of a Mul: the same values divided by a power of
+  /// two, exact in fp16 but where one falls below its normal range.
+  static func prescaleVisionLayerNorm(
+    _ g: inout Graph, _ src: Source? = nil, k: Float = visionLayerNormPrescale, fold: Bool = false
+  ) throws -> Int {
     let const = "__layernorm_vision_prescale_\(Int(k))"
     let policyConst = "__layernorm_prescale_\(layerNormPrescale)"
+    let divided = "__vision_div_\(Int(k))"
     var scaledByPolicy = Set<String>()
     for node in g.nodes where node.op == "Mul" && node.inputs.count == 2 && (node.inputs[1] == policyConst || node.inputs[1] == const) {
       if let out = node.outputs.first { scaledByPolicy.insert(out) }
     }
     let types = staticTypes(g)
+    var producer: [String: Int] = [:]
+    var uses: [String: Int] = [:]
+    for (i, n) in g.nodes.enumerated() {
+      for o in n.outputs { producer[o] = i }
+      for input in n.inputs where !input.isEmpty { uses[input, default: 0] += 1 }
+    }
+    let outputs = Set(g.outputs.map(\.key))
+    /// The convolution whose output alone, through one Transpose, is `x`.
+    func convolution(feeding x: String) -> Int? {
+      guard uses[x] == 1, !outputs.contains(x), let t = producer[x], g.nodes[t].op == "Transpose",
+        let c = g.nodes[t].inputs.first, uses[c] == 1, !outputs.contains(c),
+        let conv = producer[c], g.nodes[conv].op == "Conv", g.nodes[conv].inputs.count == 3
+      else { return nil }
+      return conv
+    }
+    // norms a fold before this one already took the 1/k for
+    var folded = Set<String>()
+    for node in g.nodes where node.op == "LayerNormalization" {
+      if let x = node.inputs.first, let conv = convolution(feeding: x), g.nodes[conv].inputs[1].hasSuffix(divided) {
+        folded.insert(x)
+      }
+    }
+    var foldNow = Set<String>()
+    var convInputs: [Int: [String]] = [:]
+    var added: [Tensor] = []
+    var originals = Set<String>()
+    if fold, let src {
+      let initializers = Dictionary(g.initializers.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
+      for node in g.nodes where node.op == "LayerNormalization" {
+        guard let x = node.inputs.first, !scaledByPolicy.contains(x), !folded.contains(x), types[x] == DataType.float16,
+          let conv = convolution(feeding: x), convInputs[conv] == nil,
+          let w = initializers[g.nodes[conv].inputs[1]], let b = initializers[g.nodes[conv].inputs[2]],
+          w.elementType == DataType.float16, b.elementType == DataType.float16
+        else { continue }
+        func scaled(_ t: Tensor) throws -> Tensor {
+          let values = try Elements.floats(Elements.littleEndian(t, src), as: t.elementType, for: t.key)
+          return Tensor(
+            name: "\(t.key)__\(conv)\(divided)", dims: t.dims, dataType: DataType.float16,
+            raw: .owned(Elements.encode(values.map { $0 / k }, as: DataType.float16)))
+        }
+        // a weight kept where the preparation cannot read it keeps its Mul
+        guard let w2 = try? scaled(w), let b2 = try? scaled(b) else { continue }
+        added += [w2, b2]
+        originals.formUnion([w.key, b.key])
+        var inputs = g.nodes[conv].inputs
+        inputs[1] = w2.key
+        inputs[2] = b2.key
+        convInputs[conv] = inputs
+        foldNow.insert(x)
+      }
+    }
     var new: [Node] = []
     new.reserveCapacity(g.nodes.count + 64)
     var scaled: [String: String] = [:]
     var done = 0
-    for node in g.nodes {
+    var multiplied = false
+    for (i, node) in g.nodes.enumerated() {
       var node = node
-      if node.op == "LayerNormalization", let x = node.inputs.first, !scaledByPolicy.contains(x), types[x] == DataType.float16 {
+      if let inputs = convInputs[i] { node.inputs = inputs }
+      if node.op == "LayerNormalization", let x = node.inputs.first, !scaledByPolicy.contains(x), !folded.contains(x),
+        types[x] == DataType.float16
+      {
+        if foldNow.contains(x) {
+          let epsilon = node.attribute("epsilon")?.f ?? 1e-5
+          node.attributes.removeAll { $0.name == "epsilon" }
+          node.attributes.append(.floatValue("epsilon", epsilon / (k * k)))
+          done += 1
+          new.append(node)
+          continue
+        }
+        multiplied = true
         if scaled[x] == nil {
           scaled[x] = "\(x)__vision_scaled"
           new.append(Node(inputs: [x, const], outputs: ["\(x)__vision_scaled"], name: "\(x)__vision_prescale", opType: "Mul"))
@@ -823,12 +896,20 @@ enum Patches {
       new.append(node)
     }
     if done > 0 {
-      let bits = Float16(1 / k).bitPattern.littleEndian
-      g.initializers.append(
-        Tensor(
-          name: const, dims: [], dataType: DataType.float16,
-          raw: .owned([UInt8(truncatingIfNeeded: bits), UInt8(truncatingIfNeeded: bits >> 8)])))
+      if multiplied && !g.initializers.contains(where: { $0.key == const }) {
+        let bits = Float16(1 / k).bitPattern.littleEndian
+        g.initializers.append(
+          Tensor(
+            name: const, dims: [], dataType: DataType.float16,
+            raw: .owned([UInt8(truncatingIfNeeded: bits), UInt8(truncatingIfNeeded: bits >> 8)])))
+      }
+      g.initializers.append(contentsOf: added)
       g.nodes = new
+      // the weights the divided copies replaced, where nothing else reads them
+      if !originals.isEmpty {
+        let read = Set(g.nodes.flatMap(\.inputs))
+        g.initializers.removeAll { originals.contains($0.key) && !read.contains($0.key) }
+      }
     }
     return done
   }

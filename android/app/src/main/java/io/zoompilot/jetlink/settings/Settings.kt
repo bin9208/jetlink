@@ -163,6 +163,14 @@ data class HudSettings(
 val NPU_EXPERIMENTS = listOf<Triple<String, String, String>>(
     // int8 weights (carrot.41-test): N16 583 ms a run on a Galaxy Tab S9, QNN
     // leaving the widened MatMuls to the CPU, and further from the CPU's. Dropped.
+    Triple(
+        "no-vision-prescale", "No Vision Prescale",
+        "Vision norms without their 1/32 (an 8 Elite's fix; an 8 Gen 2 ran right without it).",
+    ),
+    Triple(
+        "fold-vision-prescale", "Fold Vision Prescale",
+        "The 1/32 in the convolution before a vision norm instead of a separate multiply.",
+    ),
 )
 
 class Settings(context: Context) {
