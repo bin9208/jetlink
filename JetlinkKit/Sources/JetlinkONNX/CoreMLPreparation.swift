@@ -83,11 +83,20 @@ public enum CoreMLPreparation {
     /// The policy's norms (prescaled by 1/8) given a row guard that brings a
     /// row's peak under fp16's reach (`guardPolicyLayerNorm`): on a real road
     /// N16's temporal residual norms overflow fp16 at 1/8, on the benchmark's
-    /// random bytes they do not.
+    /// random bytes they do not. On a Y700 (carrot.49) 4x further from the
+    /// CPU on random bytes than without: out of the sweep.
     case policyNormGuard = "policy-norm-guard"
     /// Every norm in carrot.23's fp16-safe form (`safeLayerNorm`), after the
-    /// prescales; measured again beside the guard, on road frames as well.
+    /// prescales. On a Y700 (carrot.49) 0.71 m from the CPU, 36 ms: out.
     case safeNorms = "safe-norms"
+    /// The guard with a peak of 224: only rows past fp16's square are
+    /// scaled, so on random bytes only the ops differ from what ships.
+    case normGuard224 = "norm-guard-224"
+    /// The guard folded into the 1/8 prescale's one Mul, peak 224
+    /// (`guardPolicyPrescale`): the norm still reads a Mul's output.
+    case normGuard224One = "norm-guard-224-one"
+    /// The same at a peak of 128.
+    case normGuard128One = "norm-guard-128-one"
 
     public static func < (a: Experiment, b: Experiment) -> Bool { a.rawValue < b.rawValue }
 
@@ -97,9 +106,9 @@ public enum CoreMLPreparation {
     }
 
     /// What the sweep tries: the precision candidates for an 8 Elite's N16
-    /// (carrot.49). The vision-prescale ones (carrot.48) were for an 8 Gen 2's
-    /// speed and stay switchable but out of the sweep.
-    public static let swept: [Experiment] = [.policyNormGuard, .safeNorms]
+    /// (carrot.50-test). The vision-prescale ones (carrot.48) were for an
+    /// 8 Gen 2's speed and stay switchable but out of the sweep.
+    public static let swept: [Experiment] = [.normGuard224, .normGuard224One, .normGuard128One]
 
     /// None, then each swept experiment alone.
     public static var combinations: [Set<Experiment>] {
@@ -246,6 +255,12 @@ public enum CoreMLPreparation {
       }
       if experiments.contains(.policyNormGuard) {
         guardedNorms = Patches.guardPolicyLayerNorm(&g)
+      } else if experiments.contains(.normGuard224) {
+        guardedNorms = Patches.guardPolicyLayerNorm(&g, fixedPeak: 224)
+      } else if experiments.contains(.normGuard224One) {
+        guardedNorms = Patches.guardPolicyPrescale(&g, peak: 224)
+      } else if experiments.contains(.normGuard128One) {
+        guardedNorms = Patches.guardPolicyPrescale(&g, peak: 128)
       }
       if experiments.contains(.safeNorms) {
         safeNorms = Patches.safeLayerNorm(&g)

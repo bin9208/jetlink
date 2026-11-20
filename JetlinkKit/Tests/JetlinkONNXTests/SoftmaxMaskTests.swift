@@ -153,7 +153,7 @@ import Testing
   @Test("The sweep tries none and each precision experiment alone, never int8 or the vision-prescale ones")
   func sweepsThePrecisionExperiments() {
     let sets = CoreMLPreparation.Experiment.combinations
-    #expect(sets == [[], [.policyNormGuard], [.safeNorms]])
+    #expect(sets == [[], [.normGuard224], [.normGuard224One], [.normGuard128One]])
     #expect(CoreMLPreparation.Experiment.name([.foldVisionPrescale]) == "fold-vision-prescale")
     #expect(CoreMLPreparation.Experiment.name([.policyNormGuard]) == "policy-norm-guard")
   }
@@ -181,6 +181,25 @@ import Testing
     #expect(Patches.layerNormGuardPeak(nil) == 8)
     let peak = try #require(g.initializers.first { $0.key == "x__scaled__guard_peak" })
     #expect(peak.dataType == DataType.float16)
+  }
+
+  @Test("Folded, the guard replaces the 1/8 of the policy's prescale Mul with peak / max(row peak, 8 peak)")
+  func guardFoldsIntoThePrescale() throws {
+    var g = Graph()
+    g.inputs = [ValueInfo.tensor("x", DataType.float16, [1, 288, 512])]
+    g.nodes = [
+      Node(inputs: ["x", Patches.policyPrescaleConst], outputs: ["x__scaled"], name: "x__prescale", opType: "Mul"),
+      Node(inputs: ["x__scaled", "w", "b"], outputs: ["y"], name: "ln", opType: "LayerNormalization"),
+    ]
+    #expect(Patches.guardPolicyPrescale(&g, peak: 224) == 1)
+    let mul = try #require(g.nodes.first { $0.name == "x__prescale" })
+    #expect(mul.inputs == ["x", "x__scaled__guard_c"])
+    // the norm reads the Mul's output as before
+    #expect(g.nodes.first { $0.name == "ln" }?.inputs[0] == "x__scaled")
+    // and the guard comes before the Mul
+    let order = g.nodes.map(\.name)
+    #expect(try #require(order.firstIndex(of: "x__scaled__guard_c")) < #require(order.firstIndex(of: "x__prescale")))
+    #expect(g.initializers.contains { $0.key == "__layernorm_prescale_guard_floor" })
   }
 }
 

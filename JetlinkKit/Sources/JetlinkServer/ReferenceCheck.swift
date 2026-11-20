@@ -176,14 +176,15 @@ extension EngineHost {
       }
       // and on frames of the comma's own drives, which reach what a road
       // does and random bytes do not, when this phone has kept some
-      let road = RoadFrames.load(in: roadFramesDirectory, sha256: l.sha256, spec: spec)
+      let road = RoadFrames.loadAny(in: roadFramesDirectory, sha256: l.sha256, spec: spec)
+      let roadLabel = road?.imported == true ? "imported road frames" : "road frames"
       var onRoad: ReferenceComparison? = nil
       var sweepFrames = synthetic
       if let road, var roadComparison = ReferenceComparison(spec: spec) {
-        if let outputs = try compare(road, label: "road frames", into: &roadComparison) {
+        if let outputs = try compare(road.frames, label: roadLabel, into: &roadComparison) {
           onRoad = roadComparison
           sweepOutputs = outputs
-          sweepFrames = road
+          sweepFrames = road.frames
         }
       }
       let cpuMean = cpuMs.isEmpty ? 0 : cpuMs.reduce(0, +) / Double(cpuMs.count)
@@ -219,7 +220,7 @@ extension EngineHost {
         lines = [
           experiment(
             x.name, x.backend, model: model, spec: spec, sha256: l.sha256, frames: sweepFrames, cpu: sweepOutputs,
-            label: onRoad == nil ? "changing frames" : "road frames",
+            label: onRoad == nil ? "changing frames" : roadLabel,
             progress: { progress("experiments: \(i + 1)/\(sweep.count) \(x.name): \($0)") })
         ]
       }

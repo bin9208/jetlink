@@ -85,9 +85,25 @@ final class RoadFrames {
     }
   }
 
+  /// A set the person brought in (Settings → NPU 실험 → 도로 프레임 가져오기),
+  /// read when the phone has none of its own for the model.
+  static let importedName = "imported.roadframes"
+
+  /// The phone's own frames for this model, else an imported set, if their
+  /// sizes are the spec's; `imported` says which.
+  static func loadAny(in directory: URL, sha256: String, spec: ModelSpec) -> (frames: [Frame], imported: Bool)? {
+    if let own = load(in: directory, sha256: sha256, spec: spec) { return (own, false) }
+    if let brought = load(from: directory.appending(path: importedName), spec: spec) { return (brought, true) }
+    return nil
+  }
+
   /// The frames written for this model, if their sizes are the spec's.
   static func load(in directory: URL, sha256: String, spec: ModelSpec) -> [Frame]? {
-    guard let data = try? Data(contentsOf: file(in: directory, sha256: sha256)), data.count >= 16 else { return nil }
+    load(from: file(in: directory, sha256: sha256), spec: spec)
+  }
+
+  static func load(from url: URL, spec: ModelSpec) -> [Frame]? {
+    guard let data = try? Data(contentsOf: url), data.count >= 16 else { return nil }
     func get(_ at: Int) -> Int {
       Int(UInt32(littleEndian: data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: at, as: UInt32.self) }))
     }

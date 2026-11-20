@@ -574,7 +574,11 @@ enum Patches {
   /// epsilon, about 1e-4 of those rows' variance at most.
   static var policyPrescaleConst: String { "__layernorm_prescale_\(layerNormPrescale)" }
 
-  static func guardPolicyLayerNorm(_ g: inout Graph) -> Int {
+  /// `fixedPeak` instead of `layerNormGuardPeak`: a high one (224) touches
+  /// only the rows past fp16's square, so on the benchmark's random bytes
+  /// the values are the shipped ones and only the ops are new (carrot.50-test:
+  /// the guard at 8 put N16 on a Y700 4x further from the CPU than without).
+  static func guardPolicyLayerNorm(_ g: inout Graph, fixedPeak: Float? = nil) -> Int {
     let policyConst = policyPrescaleConst
     var policyScaled = Set<String>()
     for node in g.nodes where node.op == "Mul" && node.inputs.count == 2 && node.inputs[1] == policyConst {
@@ -613,7 +617,7 @@ enum Patches {
       if let shape, shape.count >= Int(-axis), shape.suffix(Int(-axis)).allSatisfy({ $0 > 0 }) {
         d = shape.suffix(Int(-axis)).reduce(1, *)
       }
-      let peak = layerNormGuardPeak(d)
+      let peak = fixedPeak ?? layerNormGuardPeak(d)
       let axes = "\(p)_axes"
       var t = int64Tensor(Array(axis...(-1)), axes)
       t.dims = [Int64(-axis)]
@@ -630,6 +634,65 @@ enum Patches {
       guarded[x] = "\(p)_x"
       node.inputs[0] = "\(p)_x"
       new.append(node)
+      done += 1
+    }
+    if done > 0 {
+      g.nodes = new
+      g.initializers.append(contentsOf: added)
+    }
+    return done
+  }
+
+  /// The guard folded into the policy prescale itself: each `x * 1/8` that
+  /// feeds a norm becomes `x * peak / max(max|x|, 8 peak)` per row, one Mul as
+  /// before, so the norm still reads a Mul's output (QNN may fuse the pair).
+  /// A row whose peak stays under 8 peak gets exactly 1/8 again. Returns how
+  /// many prescale Muls.
+  static func guardPolicyPrescale(_ g: inout Graph, peak: Float) -> Int {
+    let policyConst = policyPrescaleConst
+    // the axes each prescaled tensor is normalized over, from the norms reading it
+    var axisOf: [String: Int64] = [:]
+    for node in g.nodes where node.op == "LayerNormalization" {
+      if let x = node.inputs.first { axisOf[x] = node.attribute("axis")?.i ?? -1 }
+    }
+    var new: [Node] = []
+    new.reserveCapacity(g.nodes.count + 5 * 80)
+    var added: [Tensor] = []
+    var done = 0
+    func half(_ name: String, _ value: Float) {
+      let bits = Float16(value).bitPattern.littleEndian
+      added.append(
+        Tensor(name: name, dims: [], dataType: DataType.float16, raw: .owned([UInt8(truncatingIfNeeded: bits), UInt8(truncatingIfNeeded: bits >> 8)])))
+    }
+    let top = "__layernorm_prescale_guard_peak"
+    let floor = "__layernorm_prescale_guard_floor"
+    for node in g.nodes {
+      guard node.op == "Mul", node.inputs.count == 2, node.inputs[1] == policyConst, let out = node.outputs.first,
+        let axis = axisOf[out], axis < 0
+      else {
+        new.append(node)
+        continue
+      }
+      if done == 0 {
+        half(top, peak)
+        half(floor, peak * Float(layerNormPrescale))
+      }
+      let x = node.inputs[0]
+      let p = "\(out)__guard"
+      let axes = "\(p)_axes"
+      var t = int64Tensor(Array(axis...(-1)), axes)
+      t.dims = [Int64(-axis)]
+      added.append(t)
+      func n(_ op: String, _ inputs: [String], _ o: String, _ attributes: [Attribute] = []) {
+        new.append(Node(inputs: inputs, outputs: [o], name: o, opType: op, attributes: attributes))
+      }
+      n("Abs", [x], "\(p)_abs")
+      n("ReduceMax", ["\(p)_abs", axes], "\(p)_rowmax", [Attribute.int("keepdims", 1)])
+      n("Max", ["\(p)_rowmax", floor], "\(p)_s")
+      n("Div", [top, "\(p)_s"], "\(p)_c")
+      var mul = node
+      mul.inputs[1] = "\(p)_c"
+      new.append(mul)
       done += 1
     }
     if done > 0 {

@@ -161,14 +161,20 @@ data class HudSettings(
 
 /** The test app's NPU experiments: id, title, what it does. */
 val NPU_EXPERIMENTS = listOf<Triple<String, String, String>>(
-    // carrot.49: the precision candidates for N16 on an 8 Elite, in both apps
+    // carrot.50-test: the precision candidates for N16 on an 8 Elite. carrot.49's
+    // guard at 8 (policy-norm-guard, 4x further from the CPU on a Y700) and
+    // safe-norms (0.71 m, 36 ms) are dropped from the list.
     Triple(
-        "policy-norm-guard", "정책부 norm 가드",
-        "도로에서 fp16 범위를 넘는 정책부 LayerNorm 입력을 행마다 줄입니다(결과는 같고 넘침만 막음).",
+        "norm-guard-224", "정책부 norm 가드 224",
+        "fp16 제곱이 넘치는 행(최대값 224 초과)만 줄입니다. 무작위 영상에서는 값이 그대로입니다.",
     ),
     Triple(
-        "safe-norms", "안전형 norm (carrot.23)",
-        "모든 LayerNorm을 fp16 안전형으로 계산합니다. 8 Gen 2에서는 느렸던 방식입니다.",
+        "norm-guard-224-one", "정책부 norm 가드 224 (곱셈 하나)",
+        "같은 가드를 기존 1/8 곱셈 하나에 합칩니다(곱셈→LayerNorm 모양 유지).",
+    ),
+    Triple(
+        "norm-guard-128-one", "정책부 norm 가드 128 (곱셈 하나)",
+        "곱셈 하나로 합친 가드, 최대값 128 초과 행을 줄입니다.",
     ),
     // int8 weights (carrot.41-test): N16 583 ms a run on a Galaxy Tab S9, QNN
     // leaving the widened MatMuls to the CPU, and further from the CPU's. Dropped.
