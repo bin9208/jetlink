@@ -31,28 +31,13 @@ public protocol ModelPreparer: Sendable {
   /// Writes the parts into `directory` in the device's layout.
   func prepare(model: URL, into directory: URL, layout: CoreMLPreparation.Layout, cacheKey: @escaping (String) -> String) throws
     -> PreparedModel
-  /// The same preparer trying these on the Hexagon NPU (the test app's).
-  func with(experiments: Set<CoreMLPreparation.Experiment>) -> any ModelPreparer
-}
-
-extension ModelPreparer {
-  public func with(experiments: Set<CoreMLPreparation.Experiment>) -> any ModelPreparer { self }
 }
 
 /// The server's reading and preparing of an ONNX, through JetlinkONNX: the
 /// spec from the graph's inputs, outputs and output_slices, and the CoreML
 /// preparation the Python backend does, streamed from a mapped file.
 public struct ONNXPreparer: ModelPreparer {
-  /// What a test build tries on the Hexagon NPU (`CoreMLPreparation.Experiment`).
-  public let experiments: Set<CoreMLPreparation.Experiment>
-
-  public init(experiments: Set<CoreMLPreparation.Experiment> = []) {
-    self.experiments = experiments
-  }
-
-  public func with(experiments: Set<CoreMLPreparation.Experiment>) -> any ModelPreparer {
-    ONNXPreparer(experiments: experiments)
-  }
+  public init() {}
 
   public func readSpec(model: URL, sha256: String, nbytes: Int64, frameSkip: Int) throws -> ModelSpec {
     let meta = try OnnxMeta.read(contentsOf: model)
@@ -69,12 +54,12 @@ public struct ONNXPreparer: ModelPreparer {
   public func prepare(model: URL, into directory: URL, layout: CoreMLPreparation.Layout, cacheKey: @escaping (String) -> String) throws
     -> PreparedModel
   {
-    let report = try CoreMLPreparation.prepare(source: model, into: directory, layout: layout, cacheKey: cacheKey, experiments: experiments)
+    let report = try CoreMLPreparation.prepare(source: model, into: directory, layout: layout, cacheKey: cacheKey)
     var summary =
       "stripped \(report.stripped) tinygrad op(s), \(report.retypedImages ? "images retyped to fp16" : "inputs left as declared"), "
       + "\(report.gathers) negative Gather index(es) normalized, \(report.gemms) MatMul+Add rewritten as Gemm(transB=1), \(report.tiles) Expand(s) as Tile"
     if layout == .aneWhole || layout == .hexagonWhole {
-      summary += "; for the whole Neural Engine: \(report.norms) policy LayerNormalization(s) prescaled, \(report.visionNorms) vision LayerNormalization(s) prescaled with their epsilon, \(report.stateIO) state queue(s) fp16 at the edge, \(report.int8Weights) weight(s) int8, \(report.guardedNorms) policy norm(s) row-guarded, \(report.safeNorms) norm(s) in fp16-safe form, \(report.heads) vision head node(s) in fp32, \(report.biasMasks) constant Softmax mask(s) as an fp16 bias, \(report.masks) Softmax mask fill(s) made finite"
+      summary += "; for the whole Neural Engine: \(report.norms) policy LayerNormalization(s) prescaled, \(report.visionNorms) vision LayerNormalization(s) prescaled with their epsilon, \(report.stateIO) state queue(s) fp16 at the edge, \(report.heads) vision head node(s) in fp32, \(report.biasMasks) constant Softmax mask(s) as an fp16 bias, \(report.masks) Softmax mask fill(s) made finite"
     }
     return PreparedModel(
       parts: report.parts.map { PreparedModel.Part(name: $0.name, file: $0.url.lastPathComponent, weightBytes: $0.weightBytes) },

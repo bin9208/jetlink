@@ -1,7 +1,6 @@
 #if os(Android)
   import Android
   import Foundation
-  import JetlinkONNX
   import JetlinkKit
   import JetlinkLiteRT
   import JetlinkLog
@@ -191,8 +190,7 @@
       let server: EmbeddedServer
       do {
         server = try EmbeddedServer(
-          configuration: configuration, backend: backend, gadget: gadget,
-          hooks: ServerHooks(thermal: { Host.shared.thermal }, auxBenchmark: AuxBenchmarkModel.carrot))
+          configuration: configuration, backend: backend, gadget: gadget, hooks: ServerHooks(thermal: { Host.shared.thermal }))
         state.reset()
         let events = server.events
         let state = self.state
@@ -235,9 +233,7 @@
         return OrtBackend(
           profile: profile, preparer: ONNXPreparer(), keepAlive: (config["keep_alive"] as? Bool) ?? true,
           keepCPUWarm: (config["keep_cpu_warm"] as? Bool) ?? false, chip: chip,
-          tryNpuSharedMemory: (config["npu_shared_memory"] as? Bool) ?? false,
-          experiments: Set(((config["experiments"] as? [Any]) ?? []).compactMap { ($0 as? String).flatMap(CoreMLPreparation.Experiment.init(rawValue:)) }),
-          offersExperiments: (config["experiment_sweep"] as? Bool) ?? false)
+          tryNpuSharedMemory: (config["npu_shared_memory"] as? Bool) ?? false)
       case let other:
         throw HostFailure("unknown backend \(other)")
       }

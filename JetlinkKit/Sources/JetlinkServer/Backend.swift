@@ -109,12 +109,6 @@ public protocol EngineBackend: AnyObject, Sendable {
   /// The built artifact timed under each way of running it the backend can
   /// choose without building again (`OrtBackend.compareVariants`).
   func compareVariants(artifact: URL, progress: @escaping (String) -> Void) -> [String]
-  /// The test build's experiments this backend can try, each a backend of
-  /// its own (its artifacts tagged apart), besides the one it runs: what the
-  /// benchmark's experiment sweep builds and compares (`OrtBackend`).
-  func experimentBackends() -> [(name: String, backend: any EngineBackend)]
-  /// The experiments this backend runs, for the log ("none" if none).
-  var experimentName: String? { get }
 }
 
 extension EngineBackend {
@@ -123,8 +117,6 @@ extension EngineBackend {
   public func probeAgainstReference(model: URL, directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
   public func profileOnAccelerator(model: URL, directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
   public func compareVariants(artifact: URL, progress: @escaping (String) -> Void) -> [String] { [] }
-  public func experimentBackends() -> [(name: String, backend: any EngineBackend)] { [] }
-  public var experimentName: String? { nil }
 }
 
 extension Engine {

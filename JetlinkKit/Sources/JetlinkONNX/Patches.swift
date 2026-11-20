@@ -550,205 +550,6 @@ enum Patches {
     return done
   }
 
-  // MARK: guard_policy_layernorm
-
-  /// The row peak a guarded norm's input is brought down to for a normalized
-  /// axis of `d` values: d·T² = 32768, so the sum of squares fp16 adds up
-  /// stays under half of 65504 whatever the row, and 8 for d = 512.
-  static func layerNormGuardPeak(_ d: Int64?) -> Float {
-    guard let d, d > 0 else { return 8 }
-    return max(1, min(64, (32768 / Float(d)).squareRoot()))
-  }
-
-  /// Feeds every policy LayerNormalization that `prescaleLayerNorm` scaled
-  /// by 1/8 its input times T / max(max|x|, T) along the normalized axes,
-  /// one row at a time (`layerNormGuardPeak`), and returns how many norms.
-  ///
-  /// carrot's N16 on a real road reaches its temporal transformer's
-  /// residual norms (288 x 512) with values up to about 2160: over 1/8 a
-  /// single square is 73000 and a row's sum of squares 121000, past fp16's
-  /// 65504, so a Hexagon NPU's fp16 norm overflows there; the benchmark's
-  /// random camera bytes keep the same norms under 1470 (sum 57000) and never
-  /// show it. A row already under T is left exactly as it was; a larger row
-  /// is scaled so its peak is T. LayerNorm does not see the scale but for its
-  /// epsilon, about 1e-4 of those rows' variance at most.
-  static var policyPrescaleConst: String { "__layernorm_prescale_\(layerNormPrescale)" }
-
-  static func guardPolicyLayerNorm(_ g: inout Graph) -> Int {
-    let policyConst = policyPrescaleConst
-    var policyScaled = Set<String>()
-    for node in g.nodes where node.op == "Mul" && node.inputs.count == 2 && node.inputs[1] == policyConst {
-      if let out = node.outputs.first { policyScaled.insert(out) }
-    }
-    guard !policyScaled.isEmpty else { return 0 }
-    let dims = staticDims(g)
-    var new: [Node] = []
-    new.reserveCapacity(g.nodes.count + 6 * 80)
-    var added: [Tensor] = []
-    var guarded: [String: String] = [:]
-    var done = 0
-    func half(_ name: String, _ value: Float) {
-      let bits = Float16(value).bitPattern.littleEndian
-      added.append(
-        Tensor(name: name, dims: [], dataType: DataType.float16, raw: .owned([UInt8(truncatingIfNeeded: bits), UInt8(truncatingIfNeeded: bits >> 8)])))
-    }
-    for node in g.nodes {
-      var node = node
-      let axis = node.attribute("axis")?.i ?? -1
-      // a non-negative axis needs the rank, which the driving models' norms never use
-      guard node.op == "LayerNormalization", let x = node.inputs.first, policyScaled.contains(x), axis < 0 else {
-        new.append(node)
-        continue
-      }
-      if let y = guarded[x] {
-        node.inputs[0] = y
-        new.append(node)
-        done += 1
-        continue
-      }
-      let p = "\(x)__guard"
-      // the Mul's output has no value info; its input, the norm's own, does
-      let shape = dims[x] ?? (x.hasSuffix("__scaled") ? dims[String(x.dropLast("__scaled".count))] : nil)
-      var d: Int64? = nil
-      if let shape, shape.count >= Int(-axis), shape.suffix(Int(-axis)).allSatisfy({ $0 > 0 }) {
-        d = shape.suffix(Int(-axis)).reduce(1, *)
-      }
-      let peak = layerNormGuardPeak(d)
-      let axes = "\(p)_axes"
-      var t = int64Tensor(Array(axis...(-1)), axes)
-      t.dims = [Int64(-axis)]
-      added.append(t)
-      half("\(p)_peak", peak)
-      func n(_ op: String, _ inputs: [String], _ out: String, _ attributes: [Attribute] = []) {
-        new.append(Node(inputs: inputs, outputs: [out], name: out, opType: op, attributes: attributes))
-      }
-      n("Abs", [x], "\(p)_abs")
-      n("ReduceMax", ["\(p)_abs", axes], "\(p)_rowmax", [Attribute.int("keepdims", 1)])
-      n("Max", ["\(p)_rowmax", "\(p)_peak"], "\(p)_s")
-      n("Div", ["\(p)_peak", "\(p)_s"], "\(p)_c")
-      n("Mul", [x, "\(p)_c"], "\(p)_x")
-      guarded[x] = "\(p)_x"
-      node.inputs[0] = "\(p)_x"
-      new.append(node)
-      done += 1
-    }
-    if done > 0 {
-      g.nodes = new
-      g.initializers.append(contentsOf: added)
-    }
-    return done
-  }
-
-  // MARK: int8_weights
-
-  /// The weights of MatMul, Gemm and Conv with at least `minimum` elements as
-  /// int8, one scale per output channel (symmetric, zero point 0), read
-  /// through a DequantizeLinear to the type they had: a quarter of fp32's
-  /// bytes and half of fp16's for the NPU to read each run, if QNN runs them
-  /// so. Returns how many. Last of the patches, as the norms' vision mask
-  /// reads the graph as exported; a weight the Gemm rewrite transposes is
-  /// transposed here first.
-  /// Each DequantizeLinear sits just before what reads it: carrot.40-test
-  /// put them all first and a Galaxy Tab S9's NPU, holding every widened
-  /// weight at once, could not create the context (QNN error 1002).
-  static func int8Weights(_ g: inout Graph, _ src: Source, minimum: Int = 65_536) throws -> Int {
-    var inits: [String: Int] = [:]
-    for (i, t) in g.initializers.enumerated() { inits[t.key] = i }
-    var readers: [String: Int] = [:]
-    for n in g.nodes { for x in n.inputs { readers[x, default: 0] += 1 } }
-    var done: [String: String] = [:]
-    var added: [Tensor] = []
-    var dequant: [Int: [Node]] = [:]
-    var replaced = Set<String>()
-    for (k, node) in g.nodes.enumerated() where ["MatMul", "Gemm", "Conv"].contains(node.op) && node.inputs.count >= 2 {
-      let name = node.inputs[1]
-      if let made = done[name] {
-        g.nodes[k].inputs[1] = made
-        continue
-      }
-      guard let i = inits[name] else { continue }
-      let t = g.initializers[i]
-      guard t.elementType == DataType.float16 || t.elementType == DataType.float, t.elementCount >= minimum, t.dims.count >= 2 else { continue }
-      if case .widened = t.raw { continue }
-      // the output channel's axis: B's columns, a Gemm's rows when transB, a Conv's first
-      let axis: Int
-      switch node.op {
-      case "MatMul":
-        guard t.dims.count == 2 else { continue }
-        axis = 1
-      case "Gemm": axis = (node.attribute("transB")?.i ?? 0) == 1 ? 0 : 1
-      default: axis = 0
-      }
-      let values: [Float]
-      if case .transposed(let tr) = t.raw {
-        // the Gemm rewrite's [rows, cols] weight, as the [cols, rows] it writes
-        let bytes: [UInt8]
-        switch tr.elements {
-        case .source(let r): bytes = Array(src.slice(r))
-        case .owned(let b): bytes = b
-        case .typed: continue
-        }
-        let v = try Elements.floats(bytes, as: t.elementType, for: name)
-        var out = [Float](repeating: 0, count: v.count)
-        for r in 0..<tr.rows {
-          for c in 0..<tr.cols { out[c * tr.rows + r] = v[r * tr.cols + c] }
-        }
-        values = out
-      } else {
-        values = try Elements.floats(Elements.littleEndian(t, src), as: t.elementType, for: name)
-      }
-      let dims = t.dims.map(Int.init)
-      let channels = dims[axis]
-      let inner = dims[(axis + 1)...].reduce(1, *)
-      let outer = dims[..<axis].reduce(1, *)
-      var amax = [Float](repeating: 0, count: channels)
-      for o in 0..<outer {
-        for c in 0..<channels {
-          let base = (o * channels + c) * inner
-          for j in 0..<inner { amax[c] = max(amax[c], abs(values[base + j])) }
-        }
-      }
-      let scale = amax.map { $0 > 0 ? $0 / 127 : 1 }
-      var q = [UInt8](repeating: 0, count: values.count)
-      for o in 0..<outer {
-        for c in 0..<channels {
-          let base = (o * channels + c) * inner
-          let r = 1 / scale[c]
-          for j in 0..<inner {
-            let v = Int(max(-127, min(127, (values[base + j] * r).rounded())))
-            q[base + j] = UInt8(bitPattern: Int8(v))
-          }
-        }
-      }
-      let qName = "\(name)__int8"
-      let sName = "\(name)__int8_scale"
-      let zName = "\(name)__int8_zero"
-      let out = "\(name)__dequantized"
-      added.append(Tensor(name: qName, dims: t.dims, dataType: DataType.int8, raw: .owned(q)))
-      added.append(Tensor(name: sName, dims: [Int64(channels)], dataType: t.elementType, raw: .owned(Elements.encode(scale, as: t.elementType))))
-      added.append(Tensor(name: zName, dims: [Int64(channels)], dataType: DataType.int8, raw: .owned([UInt8](repeating: 0, count: channels))))
-      dequant[k, default: []].append(
-        Node(inputs: [qName, sName, zName], outputs: [out], name: out, opType: "DequantizeLinear", attributes: [.int("axis", Int64(axis))]))
-      done[name] = out
-      g.nodes[k].inputs[1] = out
-      replaced.insert(name)
-    }
-    guard !done.isEmpty else { return 0 }
-    // the fp weights a rewritten node alone read go
-    var still = Set<String>()
-    for n in g.nodes { still.formUnion(n.inputs) }
-    g.initializers.removeAll { replaced.contains($0.key) && !still.contains($0.key) }
-    g.initializers.append(contentsOf: added)
-    var nodes: [Node] = []
-    nodes.reserveCapacity(g.nodes.count + done.count)
-    for (k, n) in g.nodes.enumerated() {
-      nodes.append(contentsOf: dequant[k] ?? [])
-      nodes.append(n)
-    }
-    g.nodes = nodes
-    return done.count
-  }
-
   // MARK: fp16_state_io
 
   /// Makes a stateful graph's fp32 queues (`state_X` in, `next_state_X` out)
@@ -884,94 +685,21 @@ enum Patches {
   /// were metres from the CPU's on the same frames. Divided by 32 the worst
   /// sum is about 4000. LayerNorm(x / k) with epsilon / k² is LayerNorm(x)
   /// with epsilon exactly.
-  ///
-  /// With `fold` (and `src` to read weights from), a norm whose input is a
-  /// convolution's output alone, through a Transpose (N16's ConvNeXt blocks:
-  /// Conv -> Transpose -> LayerNorm), takes the 1/k in that convolution's
-  /// weight and bias instead of a Mul: the same values divided by a power of
-  /// two, exact in fp16 but where one falls below its normal range.
-  static func prescaleVisionLayerNorm(
-    _ g: inout Graph, _ src: Source? = nil, k: Float = visionLayerNormPrescale, fold: Bool = false
-  ) throws -> Int {
+  static func prescaleVisionLayerNorm(_ g: inout Graph, k: Float = visionLayerNormPrescale) throws -> Int {
     let const = "__layernorm_vision_prescale_\(Int(k))"
     let policyConst = "__layernorm_prescale_\(layerNormPrescale)"
-    let divided = "__vision_div_\(Int(k))"
     var scaledByPolicy = Set<String>()
     for node in g.nodes where node.op == "Mul" && node.inputs.count == 2 && (node.inputs[1] == policyConst || node.inputs[1] == const) {
       if let out = node.outputs.first { scaledByPolicy.insert(out) }
     }
     let types = staticTypes(g)
-    var producer: [String: Int] = [:]
-    var uses: [String: Int] = [:]
-    for (i, n) in g.nodes.enumerated() {
-      for o in n.outputs { producer[o] = i }
-      for input in n.inputs where !input.isEmpty { uses[input, default: 0] += 1 }
-    }
-    let outputs = Set(g.outputs.map(\.key))
-    /// The convolution whose output alone, through one Transpose, is `x`.
-    func convolution(feeding x: String) -> Int? {
-      guard uses[x] == 1, !outputs.contains(x), let t = producer[x], g.nodes[t].op == "Transpose",
-        let c = g.nodes[t].inputs.first, uses[c] == 1, !outputs.contains(c),
-        let conv = producer[c], g.nodes[conv].op == "Conv", g.nodes[conv].inputs.count == 3
-      else { return nil }
-      return conv
-    }
-    // norms a fold before this one already took the 1/k for
-    var folded = Set<String>()
-    for node in g.nodes where node.op == "LayerNormalization" {
-      if let x = node.inputs.first, let conv = convolution(feeding: x), g.nodes[conv].inputs[1].hasSuffix(divided) {
-        folded.insert(x)
-      }
-    }
-    var foldNow = Set<String>()
-    var convInputs: [Int: [String]] = [:]
-    var added: [Tensor] = []
-    var originals = Set<String>()
-    if fold, let src {
-      let initializers = Dictionary(g.initializers.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
-      for node in g.nodes where node.op == "LayerNormalization" {
-        guard let x = node.inputs.first, !scaledByPolicy.contains(x), !folded.contains(x), types[x] == DataType.float16,
-          let conv = convolution(feeding: x), convInputs[conv] == nil,
-          let w = initializers[g.nodes[conv].inputs[1]], let b = initializers[g.nodes[conv].inputs[2]],
-          w.elementType == DataType.float16, b.elementType == DataType.float16
-        else { continue }
-        func scaled(_ t: Tensor) throws -> Tensor {
-          let values = try Elements.floats(Elements.littleEndian(t, src), as: t.elementType, for: t.key)
-          return Tensor(
-            name: "\(t.key)__\(conv)\(divided)", dims: t.dims, dataType: DataType.float16,
-            raw: .owned(Elements.encode(values.map { $0 / k }, as: DataType.float16)))
-        }
-        // a weight kept where the preparation cannot read it keeps its Mul
-        guard let w2 = try? scaled(w), let b2 = try? scaled(b) else { continue }
-        added += [w2, b2]
-        originals.formUnion([w.key, b.key])
-        var inputs = g.nodes[conv].inputs
-        inputs[1] = w2.key
-        inputs[2] = b2.key
-        convInputs[conv] = inputs
-        foldNow.insert(x)
-      }
-    }
     var new: [Node] = []
     new.reserveCapacity(g.nodes.count + 64)
     var scaled: [String: String] = [:]
     var done = 0
-    var multiplied = false
-    for (i, node) in g.nodes.enumerated() {
+    for node in g.nodes {
       var node = node
-      if let inputs = convInputs[i] { node.inputs = inputs }
-      if node.op == "LayerNormalization", let x = node.inputs.first, !scaledByPolicy.contains(x), !folded.contains(x),
-        types[x] == DataType.float16
-      {
-        if foldNow.contains(x) {
-          let epsilon = node.attribute("epsilon")?.f ?? 1e-5
-          node.attributes.removeAll { $0.name == "epsilon" }
-          node.attributes.append(.floatValue("epsilon", epsilon / (k * k)))
-          done += 1
-          new.append(node)
-          continue
-        }
-        multiplied = true
+      if node.op == "LayerNormalization", let x = node.inputs.first, !scaledByPolicy.contains(x), types[x] == DataType.float16 {
         if scaled[x] == nil {
           scaled[x] = "\(x)__vision_scaled"
           new.append(Node(inputs: [x, const], outputs: ["\(x)__vision_scaled"], name: "\(x)__vision_prescale", opType: "Mul"))
@@ -985,20 +713,12 @@ enum Patches {
       new.append(node)
     }
     if done > 0 {
-      if multiplied && !g.initializers.contains(where: { $0.key == const }) {
-        let bits = Float16(1 / k).bitPattern.littleEndian
-        g.initializers.append(
-          Tensor(
-            name: const, dims: [], dataType: DataType.float16,
-            raw: .owned([UInt8(truncatingIfNeeded: bits), UInt8(truncatingIfNeeded: bits >> 8)])))
-      }
-      g.initializers.append(contentsOf: added)
+      let bits = Float16(1 / k).bitPattern.littleEndian
+      g.initializers.append(
+        Tensor(
+          name: const, dims: [], dataType: DataType.float16,
+          raw: .owned([UInt8(truncatingIfNeeded: bits), UInt8(truncatingIfNeeded: bits >> 8)])))
       g.nodes = new
-      // the weights the divided copies replaced, where nothing else reads them
-      if !originals.isEmpty {
-        let read = Set(g.nodes.flatMap(\.inputs))
-        g.initializers.removeAll { originals.contains($0.key) && !read.contains($0.key) }
-      }
     }
     return done
   }

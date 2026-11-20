@@ -279,44 +279,6 @@ final class AuxHub: @unchecked Sendable {
     }
   }
 
-  /// A model's engine for the benchmark, loaded now on the caller's thread:
-  /// from the cache the comma's uploads fill, or `fetch`ed into it first
-  /// (`fetch` writes the file at the path it is given). It stays loaded, so
-  /// a comma that asks for it later finds it ready. Returns how it came.
-  func benchmarkEngine(
-    sha256 sha: String, bytes: Int64, fetch: (URL) throws -> Void
-  ) throws -> (engine: any AuxEngine, source: String, seconds: Double) {
-    if let engine = lock.withLock({ engines[sha] }) { return (engine, "loaded", 0) }
-    let path = modelPath(sha)
-    var source = "cached"
-    let size = (try? FileManager.default.attributesOfItem(atPath: path.path)[.size] as? NSNumber)?.int64Value
-    if size != bytes || (try? Registry.hashFile(path))?.0 != sha {
-      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-      let part = directory.appending(path: "\(sha).part")
-      try? FileManager.default.removeItem(at: part)
-      try fetch(part)
-      guard (try? Registry.hashFile(part))?.0 == sha else {
-        try? FileManager.default.removeItem(at: part)
-        throw HostError.failed("sha256 mismatch after download")
-      }
-      try? FileManager.default.removeItem(at: path)
-      try FileManager.default.moveItem(at: part, to: path)
-      source = "downloaded"
-    }
-    let started = DispatchTime.now().uptimeNanoseconds
-    let engine = try backend.load(model: path)
-    let took = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
-    guard engine.input.type == .float else { throw HostError.failed("input \(engine.input.name) is not float32") }
-    let kept = lock.withLock {
-      if let other = engines[sha] { return other }
-      engines[sha] = engine
-      failed[sha] = nil
-      return engine
-    }
-    log.info("aux model \(sha.prefix(12)) ready on \(kept.device) in \(String(format: "%.1f", took)) s (benchmark)")
-    return (kept, source, took)
-  }
-
   // MARK: jobs
 
   /// AUX_REQ: queues the job and returns nil, or returns the refusal to send

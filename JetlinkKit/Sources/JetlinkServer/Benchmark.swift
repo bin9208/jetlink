@@ -132,22 +132,8 @@ extension EngineHost {
       lock.unlock()
     }
     do {
-      let cpuAtStart = processCPUSeconds()
       let report = try measure(l, seconds: seconds, run: run)
-      let cpuAlone = (processCPUSeconds() - cpuAtStart) / max(report.seconds, 0.001)
       if !report.cancelled {
-        // The auxiliary camera models beside the driving model, while the
-        // device is as warm as the run just left it.
-        // Half the plain run, at most 30 s: a minute's benchmark gives them 30 s.
-        do {
-          for line in try auxBenchmark(l, seconds: min(30, seconds / 2), alone: report, cpuAlone: cpuAlone, run: run) {
-            log.info("benchmark: \(line)")
-          }
-        } catch {
-          log.error("benchmark: aux: failed: \(error)")
-        }
-      }
-      if !report.cancelled && !run.cancelled {
         let started = ProcessInfo.processInfo.systemUptime
         let directory = cache.layout.root.appending(path: "npu-sweep", directoryHint: .isDirectory)
         let model = try? cache.modelPath(l.sha256)
@@ -180,16 +166,10 @@ extension EngineHost {
     }
   }
 
-  /// `phase` names a run besides the plain one in its log lines and
-  /// progress; `afterFrame` hears each frame's total once its reply would be
-  /// out, which is when the comma sends an auxiliary job.
-  func measure(
-    _ l: Loaded, seconds: Double, run: BenchmarkRun, phase: String = "", afterFrame: ((UInt32) -> Void)? = nil
-  ) throws -> BenchmarkReport {
+  private func measure(_ l: Loaded, seconds: Double, run: BenchmarkRun) throws -> BenchmarkReport {
     let spec = l.spec
     let device = backend.describe()["device"] ?? ""
-    let tag = phase.isEmpty ? "benchmark: " : "benchmark: \(phase): "
-    log.info("\(tag)\(device), \(Int(seconds)) s at \(ModelConstants.runFrequency) Hz")
+    log.info("benchmark: \(device), \(Int(seconds)) s at \(ModelConstants.runFrequency) Hz")
 
     var generator = SystemRandomNumberGenerator()
     let warped = (0..<spec.warpedBytes).map { _ in UInt8.random(in: 0...255, using: &generator) }
@@ -224,8 +204,7 @@ extension EngineHost {
         .benchmark(
           BenchmarkEvent(
             state: "running", elapsed: round2(ProcessInfo.processInfo.systemUptime - t0), total: seconds, frames: frameMs.count,
-            frame: BenchmarkStats.of(frameMs), report: nil,
-            detail: (phase.isEmpty ? "" : "\(phase): ") + (last.map { "window \($0.startSecond) s: \($0.thermal)" } ?? ""))))
+            frame: BenchmarkStats.of(frameMs), report: nil, detail: last.map { "window \($0.startSecond) s: \($0.thermal)" } ?? "")))
     }
     while !run.cancelled {
       let elapsed = ProcessInfo.processInfo.systemUptime - t0
@@ -271,7 +250,6 @@ extension EngineHost {
         l.staging.keep(outputs: out, type: io.type)
       }
       lock.unlock()
-      afterFrame?(totalUs)
 
       i += 1
       if i <= warmup && frameAt < EngineHost.benchmarkWarmupSeconds { continue }
@@ -304,7 +282,7 @@ extension EngineHost {
       windows.append(
         BenchmarkWindow(startSecond: windowStart, frame: BenchmarkStats.of(windowFrames), thermal: hooks.thermal()))
     }
-    if let line = steadiness?.summary { log.info("\(tag)\(line)") }
+    if let line = steadiness?.summary { log.info("benchmark: \(line)") }
     // The numbers the report shows on the screen, in the log too, where a
     // shared log bundle carries them: whole frame, the engine's run and its
     // parts, the queues, reading the output back.
@@ -315,7 +293,7 @@ extension EngineHost {
     var times = [stats("frame", frameMs), stats("engine", accelMs)]
     times += phaseOrder.map { stats("  \($0)", phaseMs[$0]!) }
     times += [stats("queues", queueMs), stats("output", outMs)]
-    log.info("\(tag)\(frameMs.count) frames (\(nonFinite) not finite), ms: \(times.joined(separator: "; "))")
+    log.info("benchmark: \(frameMs.count) frames (\(nonFinite) not finite), ms: \(times.joined(separator: "; "))")
     return BenchmarkReport(
       sha256: l.sha256, device: device, seconds: round2(ProcessInfo.processInfo.systemUptime - t0), frames: frameMs.count,
       frame: BenchmarkStats.of(frameMs), accelerator: BenchmarkStats.of(accelMs), queues: BenchmarkStats.of(queueMs), output: BenchmarkStats.of(outMs),

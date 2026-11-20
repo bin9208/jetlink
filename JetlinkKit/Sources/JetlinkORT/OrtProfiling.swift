@@ -122,19 +122,12 @@ struct QnnProfile {
           + rootList.prefix(10).map { String(format: "%@ %.1f %@", $0.key, $0.value.sum / Double(max($0.value.count, 1)), $0.value.unit) }
           .joined(separator: "; "))
     }
-    // A node's run is counted in cycles; the build's steps (VTCM allocation,
-    // graph sequencing) come as sub-events in microseconds. Only the cycles
-    // are the run's share: mixing the two put build steps at the top.
-    let mean = { (t: Total) in t.sum / Double(max(t.count, 1)) }
-    let running = nodes.filter { $0.value.unit.uppercased().contains("CYCLE") }
-    let building = nodes.filter { !$0.value.unit.uppercased().contains("CYCLE") }
-    let measured = running.isEmpty ? nodes : running
-    let total = measured.values.reduce(0) { $0 + mean($1) }
-    let nodeList = measured.sorted { mean($0.value) > mean($1.value) }
+    let total = nodes.values.reduce(0) { $0 + $1.sum / Double(max($1.count, 1)) }
+    let nodeList = nodes.sorted { $0.value.sum / Double(max($0.value.count, 1)) > $1.value.sum / Double(max($1.value.count, 1)) }
     if !nodeList.isEmpty {
-      lines.append(String(format: "profile: %d nodes, %.0f %@ a run in all", measured.count, total, nodeList[0].value.unit))
+      lines.append(String(format: "profile: %d nodes, %.0f %@ a run in all", nodes.count, total, nodeList[0].value.unit))
       // in chunks, so no log line is too long to read
-      let shown = nodeList.prefix(top).map { (key: $0.key, mean: mean($0.value)) }
+      let shown = nodeList.prefix(top).map { (key: $0.key, mean: $0.value.sum / Double(max($0.value.count, 1))) }
       for chunk in stride(from: 0, to: shown.count, by: 5) {
         lines.append(
           "profile: top \(chunk + 1)-\(min(chunk + 5, shown.count)): "
@@ -142,42 +135,7 @@ struct QnnProfile {
               String(format: "%@ %.0f (%.1f%%)", $0.key, $0.mean, total > 0 ? $0.mean / total * 100 : 0)
             }.joined(separator: "; "))
       }
-      // Where the run goes by kind of node (every GELU, every Transpose
-      // together), which says which rewrite could pay; a slowest-node list
-      // spread over 1000+ nodes does not.
-      var kinds: [String: (share: Double, count: Int)] = [:]
-      for (key, value) in measured {
-        let kind = QnnProfile.kind(key)
-        kinds[kind, default: (0, 0)].share += mean(value)
-        kinds[kind]!.count += 1
-      }
-      let kindList = kinds.sorted { $0.value.share > $1.value.share }.prefix(top)
-      let kindShown = Array(kindList)
-      for chunk in stride(from: 0, to: kindShown.count, by: 5) {
-        lines.append(
-          "profile: kinds \(chunk + 1)-\(min(chunk + 5, kindShown.count)): "
-            + kindShown[chunk..<min(chunk + 5, kindShown.count)].map {
-              String(format: "%@ %.1f%% (%d)", $0.key, total > 0 ? $0.value.share / total * 100 : 0, $0.value.count)
-            }.joined(separator: "; "))
-      }
-    }
-    if !running.isEmpty && !building.isEmpty {
-      let steps = building.sorted { mean($0.value) > mean($1.value) }.prefix(5)
-      lines.append(
-        "profile: build steps (not the run): "
-          + steps.map { String(format: "%@ %.0f %@", $0.key, mean($0.value), $0.value.unit) }.joined(separator: "; "))
     }
     return lines
-  }
-
-  /// A node's kind from QNN's name for it: "node_gelu_35_12:OpId_7920
-  /// (cycles)" is "gelu", "val_545__reshape_out_12" is "reshape_out".
-  static func kind(_ key: String) -> String {
-    var name = key.replacingOccurrences(of: " (cycles)", with: "")
-    if let opId = name.range(of: ":OpId_") { name = String(name[..<opId.lowerBound]) }
-    if name.hasPrefix("node_") { name.removeFirst(5) }
-    if name.hasPrefix("val_"), let rest = name.range(of: "__") { name = String(name[rest.upperBound...]) }
-    let parts = name.split(separator: "_").filter { !$0.allSatisfy(\.isNumber) }
-    return parts.isEmpty ? name : parts.joined(separator: "_")
   }
 }

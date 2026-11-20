@@ -106,8 +106,6 @@ final class Session: @unchecked Sendable {
     if host.session === self {
       host.session = nil
     }
-    // the drive's last frames, for the next benchmark's comparison
-    host.roadFrames.save()
     host.lock.unlock()
     transport.close()
   }
@@ -575,9 +573,6 @@ final class Session: @unchecked Sendable {
       }
       queueUs = microseconds(since: started)
       try loaded.engine.run()
-      host.roadFrames.offer(
-        sha256: loaded.sha256, warped: warped, warpedBytes: layout.warpedBytes, packed: warped + layout.warpedBytes,
-        packedBytes: loaded.spec.packedBytes)
     } catch {
       log.error("inference failed: \(String(describing: error))")
       status = .inferFailed

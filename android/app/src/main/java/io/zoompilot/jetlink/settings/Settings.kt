@@ -134,12 +134,6 @@ data class SettingsValues(
      * emulator, with no USB host, starts with it on.
      */
     val developer: Boolean = false,
-    /**
-     * The test app's experiments for the Snapdragon NPU (JetlinkONNX's
-     * `CoreMLPreparation.Experiment`), what the driving model is built with;
-     * each benchmark also compares every other combination.
-     */
-    val experiments: Set<String> = emptySet(),
     /** A TURZX panel on the phone's USB, through a hub beside the comma. Never restarts the server. */
     val hud: HudSettings = HudSettings(),
 )
@@ -159,36 +153,6 @@ data class HudSettings(
     val mirror: Boolean = false,
 )
 
-/** The test app's NPU experiments: id, title, what it does. */
-val NPU_EXPERIMENTS = listOf<Triple<String, String, String>>(
-    // carrot.49: the precision candidates for N16 on an 8 Elite, in both apps
-    Triple(
-        "policy-norm-guard", "정책부 norm 가드",
-        "도로에서 fp16 범위를 넘는 정책부 LayerNorm 입력을 행마다 줄입니다(결과는 같고 넘침만 막음).",
-    ),
-    Triple(
-        "safe-norms", "안전형 norm (carrot.23)",
-        "모든 LayerNorm을 fp16 안전형으로 계산합니다. 8 Gen 2에서는 느렸던 방식입니다.",
-    ),
-    // int8 weights (carrot.41-test): N16 583 ms a run on a Galaxy Tab S9, QNN
-    // leaving the widened MatMuls to the CPU, and further from the CPU's. Dropped.
-    Triple(
-        "no-vision-prescale", "No Vision Prescale",
-        "Vision norms without their 1/32 (an 8 Elite's fix; an 8 Gen 2 ran right without it).",
-    ),
-    Triple(
-        "fold-vision-prescale", "Fold Vision Prescale",
-        "The 1/32 in the convolution before a vision norm instead of a separate multiply.",
-    ),
-)
-
-/** The 8 Gen 2 speed experiments, the test app's alone. */
-val TEST_APP_ONLY_EXPERIMENTS = setOf("no-vision-prescale", "fold-vision-prescale")
-
-/** The experiments this app offers: the main app the precision ones only. */
-fun offeredExperiments(testApp: Boolean): List<Triple<String, String, String>> =
-    NPU_EXPERIMENTS.filter { testApp || it.first !in TEST_APP_ONLY_EXPERIMENTS }
-
 class Settings(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("settings", Context.MODE_PRIVATE).also(::migrate)
     private val state = MutableStateFlow(read())
@@ -203,7 +167,6 @@ class Settings(context: Context) {
             .putBoolean(KEEP_CPU_AWAKE, next.keepCpuAwake)
             .putBoolean(KEEP_SCREEN_ON, next.keepScreenOn)
             .putBoolean(DEVELOPER, next.developer)
-            .putStringSet(EXPERIMENTS, next.experiments)
             .putBoolean(HUD_ENABLED, next.hud.enabled)
             .putInt(HUD_BRIGHTNESS, next.hud.brightness)
             .putBoolean(HUD_ROTATE_180, next.hud.rotate180)
@@ -225,9 +188,6 @@ class Settings(context: Context) {
             keepCpuAwake = prefs.getBoolean(KEEP_CPU_AWAKE, defaults.keepCpuAwake),
             keepScreenOn = prefs.getBoolean(KEEP_SCREEN_ON, defaults.keepScreenOn),
             developer = prefs.getBoolean(DEVELOPER, Chip.isEmulator),
-            // an experiment dropped since (fold, carrot.41) is forgotten
-            experiments = prefs.getStringSet(EXPERIMENTS, null)?.toSet()?.filter { id -> NPU_EXPERIMENTS.any { it.first == id } }?.toSet()
-                ?: defaults.experiments,
             hud = HudSettings(
                 enabled = prefs.getBoolean(HUD_ENABLED, defaults.hud.enabled),
                 brightness = prefs.getInt(HUD_BRIGHTNESS, defaults.hud.brightness).coerceIn(0, 100),
@@ -245,7 +205,6 @@ class Settings(context: Context) {
         private const val KEEP_CPU_AWAKE = "keepCpuAwake"
         private const val KEEP_SCREEN_ON = "keepScreenOn"
         private const val DEVELOPER = "developer"
-        private const val EXPERIMENTS = "npuExperiments"
         private const val HUD_ENABLED = "hudEnabled"
         private const val HUD_BRIGHTNESS = "hudBrightness"
         private const val HUD_ROTATE_180 = "hudRotate180"
