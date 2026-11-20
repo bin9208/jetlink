@@ -145,12 +145,18 @@ public final class EngineHost: @unchecked Sendable {
   weak var fetcher: (any ModelFetching)?
   /// Carrot's auxiliary camera models, when the backend can run them.
   let aux: AuxHub?
+  /// Frames from the comma's drives, for the benchmark's CPU comparison.
+  /// Under `lock`.
+  let roadFrames: RoadFrames
+
+  var roadFramesDirectory: URL { cache.layout.root.appending(path: "road-frames", directoryHint: .isDirectory) }
 
   public init(cache: ServerCache, hooks: ServerHooks = ServerHooks()) {
     self.cache = cache
     self.hooks = hooks
     telemetry = TelemetrySampler(source: hooks.telemetry)
     picks = PickStore(layout: cache.layout)
+    roadFrames = RoadFrames(directory: cache.layout.root.appending(path: "road-frames", directoryHint: .isDirectory))
     aux = cache.backend.aux.map {
       AuxHub(backend: $0, directory: cache.layout.root.appending(path: "aux", directoryHint: .isDirectory), thermal: hooks.thermal)
     }

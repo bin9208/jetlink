@@ -161,6 +161,15 @@ data class HudSettings(
 
 /** The test app's NPU experiments: id, title, what it does. */
 val NPU_EXPERIMENTS = listOf<Triple<String, String, String>>(
+    // carrot.49: the precision candidates for N16 on an 8 Elite, in both apps
+    Triple(
+        "policy-norm-guard", "정책부 norm 가드",
+        "도로에서 fp16 범위를 넘는 정책부 LayerNorm 입력을 행마다 줄입니다(결과는 같고 넘침만 막음).",
+    ),
+    Triple(
+        "safe-norms", "안전형 norm (carrot.23)",
+        "모든 LayerNorm을 fp16 안전형으로 계산합니다. 8 Gen 2에서는 느렸던 방식입니다.",
+    ),
     // int8 weights (carrot.41-test): N16 583 ms a run on a Galaxy Tab S9, QNN
     // leaving the widened MatMuls to the CPU, and further from the CPU's. Dropped.
     Triple(
@@ -172,6 +181,13 @@ val NPU_EXPERIMENTS = listOf<Triple<String, String, String>>(
         "The 1/32 in the convolution before a vision norm instead of a separate multiply.",
     ),
 )
+
+/** The 8 Gen 2 speed experiments, the test app's alone. */
+val TEST_APP_ONLY_EXPERIMENTS = setOf("no-vision-prescale", "fold-vision-prescale")
+
+/** The experiments this app offers: the main app the precision ones only. */
+fun offeredExperiments(testApp: Boolean): List<Triple<String, String, String>> =
+    NPU_EXPERIMENTS.filter { testApp || it.first !in TEST_APP_ONLY_EXPERIMENTS }
 
 class Settings(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("settings", Context.MODE_PRIVATE).also(::migrate)

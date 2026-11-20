@@ -77,7 +77,7 @@ import io.zoompilot.jetlink.ui.components.CardSpacing
 import io.zoompilot.jetlink.ui.components.FormFooter
 import io.zoompilot.jetlink.ui.components.FormSection
 import io.zoompilot.jetlink.ui.components.RowDivider
-import io.zoompilot.jetlink.settings.NPU_EXPERIMENTS
+import io.zoompilot.jetlink.settings.offeredExperiments
 import io.zoompilot.jetlink.ui.components.SwitchRow
 import io.zoompilot.jetlink.ui.components.ValueRow
 import io.zoompilot.jetlink.ui.components.rememberWifiAddress
@@ -334,13 +334,14 @@ private fun Performance(values: SettingsValues, info: SettingsInfo, actions: Set
             supporting = "Holds the CPU's clocks up between frames.",
         )
     }
-    // the test app's: what the NPU model is built with; a benchmark compares every combination
-    if (io.zoompilot.jetlink.BuildConfig.CHANNEL == "test" && values.processor.resolved().usesQnn && NPU_EXPERIMENTS.isNotEmpty()) {
+    // what the NPU model is built with; a benchmark compares each one (both apps since carrot.49)
+    val offered = offeredExperiments(io.zoompilot.jetlink.BuildConfig.CHANNEL == "test")
+    if (values.processor.resolved().usesQnn && offered.isNotEmpty()) {
         FormSection(
-            "NPU Experiments (테스트)",
-            footer = { FormFooter("바꾸면 서버가 다시 시작되고 켠 것으로 주행 모델을 다시 만듭니다(처음 한 번 1~2분). 벤치마크 뒤에는 모든 조합을 따로 만들어 속도와 CPU 대비 정확도를 로그에 남깁니다(몇 분 걸림).") },
+            "NPU 실험 (시험 기능)",
+            footer = { FormFooter("바꾸면 서버가 다시 시작되고 켠 것으로 주행 모델을 다시 만듭니다(처음 한 번 1~2분). 벤치마크 뒤에는 각 실험을 따로 만들어 속도와 CPU 대비 정확도를 로그에 남깁니다(몇 분 걸림). 한 번 주행한 뒤 벤치마크하면 그 주행의 도로 프레임으로도 비교합니다(프레임은 이 기기에만 저장).") },
         ) {
-            NPU_EXPERIMENTS.forEachIndexed { i, (id, title, about) ->
+            offered.forEachIndexed { i, (id, title, about) ->
                 if (i > 0) RowDivider()
                 SwitchRow(
                     title, id in values.experiments,

@@ -80,6 +80,14 @@ public enum CoreMLPreparation {
     /// The 1/32 in the convolution's weight and bias where a vision norm
     /// takes a convolution's output, rather than a Mul before the norm.
     case foldVisionPrescale = "fold-vision-prescale"
+    /// The policy's norms (prescaled by 1/8) given a row guard that brings a
+    /// row's peak under fp16's reach (`guardPolicyLayerNorm`): on a real road
+    /// N16's temporal residual norms overflow fp16 at 1/8, on the benchmark's
+    /// random bytes they do not.
+    case policyNormGuard = "policy-norm-guard"
+    /// Every norm in carrot.23's fp16-safe form (`safeLayerNorm`), after the
+    /// prescales; measured again beside the guard, on road frames as well.
+    case safeNorms = "safe-norms"
 
     public static func < (a: Experiment, b: Experiment) -> Bool { a.rawValue < b.rawValue }
 
@@ -88,11 +96,12 @@ public enum CoreMLPreparation {
       set.isEmpty ? "none" : set.sorted().map(\.rawValue).joined(separator: "+")
     }
 
-    /// What the test app's sweep tries.
-    public static let swept: [Experiment] = [.noVisionPrescale, .foldVisionPrescale]
+    /// What the sweep tries: the precision candidates for an 8 Elite's N16
+    /// (carrot.49). The vision-prescale ones (carrot.48) were for an 8 Gen 2's
+    /// speed and stay switchable but out of the sweep.
+    public static let swept: [Experiment] = [.policyNormGuard, .safeNorms]
 
-    /// None, then each swept experiment alone: the two prescale ones are
-    /// alternatives (with no norm prescaled the fold has nothing to fold).
+    /// None, then each swept experiment alone.
     public static var combinations: [Set<Experiment>] {
       [[]] + swept.map { [$0] }
     }
@@ -113,7 +122,7 @@ public enum CoreMLPreparation {
     public static func == (a: Report, b: Report) -> Bool {
       a.stripped == b.stripped && a.retypedImages == b.retypedImages && a.gathers == b.gathers && a.gemms == b.gemms
         && a.tiles == b.tiles && a.norms == b.norms && a.heads == b.heads && a.masks == b.masks && a.parts == b.parts
-        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.safeNorms == b.safeNorms && a.gelus == b.gelus && a.stateIO == b.stateIO && a.int8Weights == b.int8Weights && a.probes.map(\.name) == b.probes.map(\.name)
+        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.safeNorms == b.safeNorms && a.guardedNorms == b.guardedNorms && a.gelus == b.gelus && a.stateIO == b.stateIO && a.int8Weights == b.int8Weights && a.probes.map(\.name) == b.probes.map(\.name)
     }
     /// tinygrad layout ops bypassed.
     public let stripped: Int
@@ -141,6 +150,9 @@ public enum CoreMLPreparation {
     /// LayerNormalizations in their fp16-safe form (`safeLayerNorm`); 0
     /// unless the layout is `.hexagonWhole`.
     public var safeNorms: Int = 0
+    /// Policy LayerNormalizations given a row guard (`guardPolicyLayerNorm`);
+    /// 0 unless the experiment asks for it.
+    public var guardedNorms: Int = 0
     /// Exact GELUs made their tanh form (`tanhGelu`); 0 unless the layout is
     /// `.hexagonWhole`.
     public var gelus: Int = 0
@@ -216,6 +228,7 @@ public enum CoreMLPreparation {
     var biasMasks = 0
     var visionNorms = 0
     var safeNorms = 0
+    var guardedNorms = 0
     var gelus = 0
     var stateIO = 0
     if layout == .aneWhole {
@@ -230,6 +243,12 @@ public enum CoreMLPreparation {
       heads = try Patches.headsInFP32(&g, src)
       if !experiments.contains(.noVisionPrescale) {
         visionNorms = try Patches.prescaleVisionLayerNorm(&g, src, fold: experiments.contains(.foldVisionPrescale))
+      }
+      if experiments.contains(.policyNormGuard) {
+        guardedNorms = Patches.guardPolicyLayerNorm(&g)
+      }
+      if experiments.contains(.safeNorms) {
+        safeNorms = Patches.safeLayerNorm(&g)
       }
       stateIO = Patches.fp16StateIO(&g)
       // Not Patches.tanhGelu: QNN runs the native Gelu well. On a Snapdragon
@@ -269,6 +288,7 @@ public enum CoreMLPreparation {
     report.biasMasks = biasMasks
     report.visionNorms = visionNorms
     report.safeNorms = safeNorms
+    report.guardedNorms = guardedNorms
     report.gelus = gelus
     report.stateIO = stateIO
     report.int8Weights = int8

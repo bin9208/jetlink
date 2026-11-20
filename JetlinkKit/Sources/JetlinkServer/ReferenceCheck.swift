@@ -12,6 +12,8 @@ import Foundation
 struct ReferenceComparison {
   /// Frames compared, each different from the last.
   static let frames = 40
+  /// What the frames were, for the log: "changing frames" or "road frames".
+  var label = "changing frames"
   private let planEnd: Int
   private let lanes: Range<Int>?
   private let lead: Int?
@@ -55,7 +57,7 @@ struct ReferenceComparison {
     func text(_ v: [Float]) -> String {
       String(format: "mean %.3f max %.3f", Double(v.reduce(0, +)) / Double(v.count), Double(v.max() ?? 0))
     }
-    var line = "accelerator against the CPU over \(dy.count) changing frames, |difference|: plan end y \(text(dy)) m"
+    var line = "accelerator against the CPU over \(dy.count) \(label), |difference|: plan end y \(text(dy)) m"
     line += ", plan end x \(text(dx)) m"
     if !dLanes.isEmpty { line += ", lane lines \(text(dLanes))" }
     if !dLead.isEmpty { line += ", lead x \(text(dLead)) m" }
@@ -103,19 +105,20 @@ extension EngineHost {
         return UInt8(truncatingIfNeeded: seed >> 24)
       }
       let base = (0..<spec.warpedBytes).map { _ in next() }
-      let packed = [Float](repeating: 0, count: spec.packedCount)
-      var a = [Float](repeating: 0, count: spec.outputCount)
-      var c = [Float](repeating: 0, count: spec.outputCount)
+      let zeros = [UInt8](repeating: 0, count: spec.packedBytes)
+      var synthetic: [CameraFrame] = []
+      for frame in 0..<ReferenceComparison.frames {
+        // A moving picture: the base bytes shifted further each frame, part
+        // of them fresh, so remembered frames differ from one another.
+        var warped = base
+        let shift = (frame * 977) % max(1, warped.count)
+        warped = Array(warped[shift...] + warped[..<shift])
+        for i in stride(from: frame % 7, to: warped.count, by: 7) { warped[i] = next() }
+        synthetic.append(CameraFrame(warped: warped, packed: zeros))
+      }
       var cpuMs: [Double] = []
-      // kept for the experiment sweep, which compares against the same
-      var frames: [[UInt8]] = []
-      var cpuOutputs: [[Float]?] = []
       let sweep = backend.experimentBackends()
 
-      lock.lock()
-      l.staging.reset()
-      lock.unlock()
-      cpuStaging.reset()
       func read(_ staging: any FrameStaging, _ type: ElementType, into out: inout [Float]) -> Bool {
         let p = staging.layout.output!
         out.withUnsafeMutableBytes { o in
@@ -127,50 +130,71 @@ extension EngineHost {
         }
         return out.withUnsafeBytes { Convert.allFinite($0.baseAddress!, count: spec.outputCount) }
       }
-      for frame in 0..<ReferenceComparison.frames {
-        // A moving picture: the base bytes shifted further each frame, part
-        // of them fresh, so remembered frames differ from one another.
-        var warped = base
-        let shift = (frame * 977) % max(1, warped.count)
-        warped = Array(warped[shift...] + warped[..<shift])
-        for i in stride(from: frame % 7, to: warped.count, by: 7) { warped[i] = next() }
-
+      /// Both engines over `frames` from a fresh state each; the CPU's
+      /// outputs are kept for the experiment sweep. Nil once the engine went.
+      func compare(_ frames: [CameraFrame], label: String, into comparison: inout ReferenceComparison) throws -> [[Float]?]? {
+        var a = [Float](repeating: 0, count: spec.outputCount)
+        var c = [Float](repeating: 0, count: spec.outputCount)
+        var cpuOutputs: [[Float]?] = []
+        comparison.label = label
         lock.lock()
-        guard loaded === l else {
-          lock.unlock()
-          return ["accelerator against the CPU: the engine was unloaded"]
-        }
-        try warped.withUnsafeBytes { w in
-          try packed.withUnsafeBytes { p in try l.staging.stage(warped: w.baseAddress!, packed: p.baseAddress!) }
-        }
-        try l.engine.run()
-        let aFinite = read(l.staging, io.type, into: &a)
-        if aFinite { l.staging.keep(outputs: l.staging.layout.output!, type: io.type) }
+        l.staging.reset()
         lock.unlock()
-
-        let t = ProcessInfo.processInfo.systemUptime
-        try warped.withUnsafeBytes { w in
-          try packed.withUnsafeBytes { p in try cpuStaging.stage(warped: w.baseAddress!, packed: p.baseAddress!) }
+        cpuStaging.reset()
+        defer {
+          lock.lock()
+          if loaded === l { l.staging.reset() }
+          lock.unlock()
         }
-        try cpu.run()
-        cpuMs.append((ProcessInfo.processInfo.systemUptime - t) * 1000)
-        let cFinite = read(cpuStaging, cpuIO.type, into: &c)
-        if cFinite { cpuStaging.keep(outputs: cpuStaging.layout.output!, type: cpuIO.type) }
+        for (frame, f) in frames.enumerated() {
+          lock.lock()
+          guard loaded === l else {
+            lock.unlock()
+            return nil
+          }
+          try f.stage(l.staging)
+          try l.engine.run()
+          let aFinite = read(l.staging, io.type, into: &a)
+          if aFinite { l.staging.keep(outputs: l.staging.layout.output!, type: io.type) }
+          lock.unlock()
 
-        if aFinite && cFinite { comparison.record(frame: frame, accelerator: a, cpu: c) }
-        if !sweep.isEmpty {
-          frames.append(warped)
-          cpuOutputs.append(cFinite ? c : nil)
+          let t = ProcessInfo.processInfo.systemUptime
+          try f.stage(cpuStaging)
+          try cpu.run()
+          cpuMs.append((ProcessInfo.processInfo.systemUptime - t) * 1000)
+          let cFinite = read(cpuStaging, cpuIO.type, into: &c)
+          if cFinite { cpuStaging.keep(outputs: cpuStaging.layout.output!, type: cpuIO.type) }
+
+          if aFinite && cFinite { comparison.record(frame: frame, accelerator: a, cpu: c) }
+          if !sweep.isEmpty { cpuOutputs.append(cFinite ? c : nil) }
+          progress("CPU reference: \(label) \(frame + 1)/\(frames.count)")
         }
-        progress("CPU reference: frame \(frame + 1)/\(ReferenceComparison.frames)")
+        return cpuOutputs
       }
-      lock.lock()
-      l.staging.reset()
-      lock.unlock()
+      guard var sweepOutputs = try compare(synthetic, label: "changing frames", into: &comparison) else {
+        return ["accelerator against the CPU: the engine was unloaded"]
+      }
+      // and on frames of the comma's own drives, which reach what a road
+      // does and random bytes do not, when this phone has kept some
+      let road = RoadFrames.load(in: roadFramesDirectory, sha256: l.sha256, spec: spec)
+      var onRoad: ReferenceComparison? = nil
+      var sweepFrames = synthetic
+      if let road, var roadComparison = ReferenceComparison(spec: spec) {
+        if let outputs = try compare(road, label: "road frames", into: &roadComparison) {
+          onRoad = roadComparison
+          sweepOutputs = outputs
+          sweepFrames = road
+        }
+      }
       let cpuMean = cpuMs.isEmpty ? 0 : cpuMs.reduce(0, +) / Double(cpuMs.count)
       var lines: [String] = []
-      if let s = comparison.summary {
-        lines.append(backend.experimentName.map { "\(s) (experiments: \($0))" } ?? s)
+      for c in [comparison] + (onRoad.map { [$0] } ?? []) {
+        if let s = c.summary {
+          lines.append(backend.experimentName.map { "\(s) (experiments: \($0))" } ?? s)
+        }
+      }
+      if road == nil {
+        lines.append("no road frames on this phone yet for this model: drive with it once and benchmark again to compare on a road too")
       }
       lines.append(
         String(
@@ -194,7 +218,8 @@ extension EngineHost {
         for line in lines { log.info("benchmark: \(line)") }
         lines = [
           experiment(
-            x.name, x.backend, model: model, spec: spec, sha256: l.sha256, frames: frames, cpu: cpuOutputs,
+            x.name, x.backend, model: model, spec: spec, sha256: l.sha256, frames: sweepFrames, cpu: sweepOutputs,
+            label: onRoad == nil ? "changing frames" : "road frames",
             progress: { progress("experiments: \(i + 1)/\(sweep.count) \(x.name): \($0)") })
         ]
       }
@@ -212,10 +237,11 @@ extension EngineHost {
   /// One experiment set: built into a scratch directory, compared with the
   /// CPU's outputs for the same frames, timed, and removed again.
   func experiment(
-    _ name: String, _ backend: any EngineBackend, model: URL, spec: ModelSpec, sha256: String, frames: [[UInt8]], cpu: [[Float]?],
-    progress: @escaping (String) -> Void
+    _ name: String, _ backend: any EngineBackend, model: URL, spec: ModelSpec, sha256: String, frames: [CameraFrame], cpu: [[Float]?],
+    label: String = "changing frames", progress: @escaping (String) -> Void
   ) -> String {
     guard var comparison = ReferenceComparison(spec: spec) else { return "experiment \(name): no plan to compare" }
+    comparison.label = label
     let started = ProcessInfo.processInfo.systemUptime
     let directory = cache.layout.root.appending(path: "experiments", directoryHint: .isDirectory)
     let artifact = directory.appending(path: "\(String(sha256.prefix(16))).\(backend.tag())\(backend.suffix)")
@@ -232,14 +258,11 @@ extension EngineHost {
       defer { engine.close() }
       let staging = try Staging.forModel(spec, engine: engine)
       guard let io = engine.outputs[ModelConstants.drivingOutput] else { return "experiment \(name): no driving output" }
-      let packed = [Float](repeating: 0, count: spec.packedCount)
       var a = [Float](repeating: 0, count: spec.outputCount)
       var notFinite = 0
       staging.reset()
-      for (frame, warped) in frames.enumerated() {
-        try warped.withUnsafeBytes { w in
-          try packed.withUnsafeBytes { p in try staging.stage(warped: w.baseAddress!, packed: p.baseAddress!) }
-        }
+      for (frame, f) in frames.enumerated() {
+        try f.stage(staging)
         try engine.run()
         let p = staging.layout.output!
         a.withUnsafeMutableBytes { o in
@@ -271,6 +294,18 @@ extension EngineHost {
       return line
     } catch {
       return "experiment \(name) failed: \(String(describing: error).prefix(240))"
+    }
+  }
+}
+
+/// A frame as the comma sends it: the warped camera bytes and the packed
+/// float32 scalars after them.
+typealias CameraFrame = RoadFrames.Frame
+
+extension RoadFrames.Frame {
+  func stage(_ staging: any FrameStaging) throws {
+    try warped.withUnsafeBytes { w in
+      try packed.withUnsafeBytes { p in try staging.stage(warped: w.baseAddress!, packed: p.baseAddress!) }
     }
   }
 }

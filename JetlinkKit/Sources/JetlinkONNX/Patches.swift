@@ -550,6 +550,95 @@ enum Patches {
     return done
   }
 
+  // MARK: guard_policy_layernorm
+
+  /// The row peak a guarded norm's input is brought down to for a normalized
+  /// axis of `d` values: d·T² = 32768, so the sum of squares fp16 adds up
+  /// stays under half of 65504 whatever the row, and 8 for d = 512.
+  static func layerNormGuardPeak(_ d: Int64?) -> Float {
+    guard let d, d > 0 else { return 8 }
+    return max(1, min(64, (32768 / Float(d)).squareRoot()))
+  }
+
+  /// Feeds every policy LayerNormalization that `prescaleLayerNorm` scaled
+  /// by 1/8 its input times T / max(max|x|, T) along the normalized axes,
+  /// one row at a time (`layerNormGuardPeak`), and returns how many norms.
+  ///
+  /// carrot's N16 on a real road reaches its temporal transformer's
+  /// residual norms (288 x 512) with values up to about 2160: over 1/8 a
+  /// single square is 73000 and a row's sum of squares 121000, past fp16's
+  /// 65504, so a Hexagon NPU's fp16 norm overflows there; the benchmark's
+  /// random camera bytes keep the same norms under 1470 (sum 57000) and never
+  /// show it. A row already under T is left exactly as it was; a larger row
+  /// is scaled so its peak is T. LayerNorm does not see the scale but for its
+  /// epsilon, about 1e-4 of those rows' variance at most.
+  static var policyPrescaleConst: String { "__layernorm_prescale_\(layerNormPrescale)" }
+
+  static func guardPolicyLayerNorm(_ g: inout Graph) -> Int {
+    let policyConst = policyPrescaleConst
+    var policyScaled = Set<String>()
+    for node in g.nodes where node.op == "Mul" && node.inputs.count == 2 && node.inputs[1] == policyConst {
+      if let out = node.outputs.first { policyScaled.insert(out) }
+    }
+    guard !policyScaled.isEmpty else { return 0 }
+    let dims = staticDims(g)
+    var new: [Node] = []
+    new.reserveCapacity(g.nodes.count + 6 * 80)
+    var added: [Tensor] = []
+    var guarded: [String: String] = [:]
+    var done = 0
+    func half(_ name: String, _ value: Float) {
+      let bits = Float16(value).bitPattern.littleEndian
+      added.append(
+        Tensor(name: name, dims: [], dataType: DataType.float16, raw: .owned([UInt8(truncatingIfNeeded: bits), UInt8(truncatingIfNeeded: bits >> 8)])))
+    }
+    for node in g.nodes {
+      var node = node
+      let axis = node.attribute("axis")?.i ?? -1
+      // a non-negative axis needs the rank, which the driving models' norms never use
+      guard node.op == "LayerNormalization", let x = node.inputs.first, policyScaled.contains(x), axis < 0 else {
+        new.append(node)
+        continue
+      }
+      if let y = guarded[x] {
+        node.inputs[0] = y
+        new.append(node)
+        done += 1
+        continue
+      }
+      let p = "\(x)__guard"
+      // the Mul's output has no value info; its input, the norm's own, does
+      let shape = dims[x] ?? (x.hasSuffix("__scaled") ? dims[String(x.dropLast("__scaled".count))] : nil)
+      var d: Int64? = nil
+      if let shape, shape.count >= Int(-axis), shape.suffix(Int(-axis)).allSatisfy({ $0 > 0 }) {
+        d = shape.suffix(Int(-axis)).reduce(1, *)
+      }
+      let peak = layerNormGuardPeak(d)
+      let axes = "\(p)_axes"
+      var t = int64Tensor(Array(axis...(-1)), axes)
+      t.dims = [Int64(-axis)]
+      added.append(t)
+      half("\(p)_peak", peak)
+      func n(_ op: String, _ inputs: [String], _ out: String, _ attributes: [Attribute] = []) {
+        new.append(Node(inputs: inputs, outputs: [out], name: out, opType: op, attributes: attributes))
+      }
+      n("Abs", [x], "\(p)_abs")
+      n("ReduceMax", ["\(p)_abs", axes], "\(p)_rowmax", [Attribute.int("keepdims", 1)])
+      n("Max", ["\(p)_rowmax", "\(p)_peak"], "\(p)_s")
+      n("Div", ["\(p)_peak", "\(p)_s"], "\(p)_c")
+      n("Mul", [x, "\(p)_c"], "\(p)_x")
+      guarded[x] = "\(p)_x"
+      node.inputs[0] = "\(p)_x"
+      new.append(node)
+      done += 1
+    }
+    if done > 0 {
+      g.nodes = new
+      g.initializers.append(contentsOf: added)
+    }
+    return done
+  }
+
   // MARK: int8_weights
 
   /// The weights of MatMul, Gemm and Conv with at least `minimum` elements as

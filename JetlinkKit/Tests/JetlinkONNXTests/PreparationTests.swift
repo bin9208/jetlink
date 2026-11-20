@@ -215,11 +215,19 @@ import Testing
   @Test(.enabled(if: ProcessInfo.processInfo.environment["JETLINK_PREPARE"] != nil))
   func preparesARealModel() throws {
     let spec = ProcessInfo.processInfo.environment["JETLINK_PREPARE"]!.split(separator: ":", maxSplits: 2).map(String.init)
-    let layouts: [String: CoreMLPreparation.Layout] = ["whole": .whole, "ane-whole": .aneWhole, "split": .split, "plain": .plain]
+    let layouts: [String: CoreMLPreparation.Layout] = [
+      "whole": .whole, "ane-whole": .aneWhole, "htp-whole": .hexagonWhole, "split": .split, "plain": .plain,
+    ]
     let layout = try #require(layouts[spec[0]])
+    // JETLINK_PREPARE_EXPERIMENTS=policy-norm-guard,safe-norms for the Hexagon NPU's
+    let experiments = Set(
+      (ProcessInfo.processInfo.environment["JETLINK_PREPARE_EXPERIMENTS"] ?? "").split(separator: ",").compactMap {
+        CoreMLPreparation.Experiment(rawValue: String($0))
+      })
     let start = Date()
     let report = try CoreMLPreparation.prepare(
-      source: URL(fileURLWithPath: spec[1]), into: URL(fileURLWithPath: spec[2]), layout: layout, cacheKey: { "jetlink\($0)" })
+      source: URL(fileURLWithPath: spec[1]), into: URL(fileURLWithPath: spec[2]), layout: layout, cacheKey: { "jetlink\($0)" },
+      experiments: experiments)
     print("prepared in \(Date().timeIntervalSince(start)) s: \(report)")
   }
 }

@@ -150,11 +150,37 @@ import Testing
     #expect(try values(conv.inputs[1]) == [2, -0.015625])
   }
 
-  @Test("The sweep tries none and each prescale experiment alone, never int8")
-  func sweepsThePrescaleExperiments() {
+  @Test("The sweep tries none and each precision experiment alone, never int8 or the vision-prescale ones")
+  func sweepsThePrecisionExperiments() {
     let sets = CoreMLPreparation.Experiment.combinations
-    #expect(sets == [[], [.noVisionPrescale], [.foldVisionPrescale]])
+    #expect(sets == [[], [.policyNormGuard], [.safeNorms]])
     #expect(CoreMLPreparation.Experiment.name([.foldVisionPrescale]) == "fold-vision-prescale")
+    #expect(CoreMLPreparation.Experiment.name([.policyNormGuard]) == "policy-norm-guard")
+  }
+
+  @Test("A guarded policy norm reads its prescaled input times peak / max(row peak, peak); a vision norm is left alone")
+  func policyNormsGetARowGuard() throws {
+    var g = Graph()
+    g.inputs = [ValueInfo.tensor("x", DataType.float16, [1, 288, 512]), ValueInfo.tensor("v", DataType.float16, [1, 64])]
+    g.nodes = [
+      Node(inputs: ["x", Patches.policyPrescaleConst], outputs: ["x__scaled"], name: "x__prescale", opType: "Mul"),
+      Node(inputs: ["x__scaled", "w", "b"], outputs: ["y"], name: "ln", opType: "LayerNormalization"),
+      Node(inputs: ["x__scaled", "w", "b"], outputs: ["y2"], name: "ln2", opType: "LayerNormalization"),
+      Node(inputs: ["v", "w", "b"], outputs: ["z"], name: "vision", opType: "LayerNormalization"),
+    ]
+    #expect(Patches.guardPolicyLayerNorm(&g) == 2)
+    let ln = try #require(g.nodes.first { $0.name == "ln" })
+    #expect(ln.inputs[0] == "x__scaled__guard_x")
+    // one guard for the input both norms share
+    #expect(g.nodes.filter { $0.op == "ReduceMax" }.count == 1)
+    #expect(g.nodes.first { $0.name == "ln2" }?.inputs[0] == "x__scaled__guard_x")
+    #expect(g.nodes.first { $0.name == "vision" }?.inputs[0] == "v")
+    // 512 along the axis: a peak of 8, so a row's sum of squares stays under 32768
+    #expect(Patches.layerNormGuardPeak(512) == 8)
+    #expect(Patches.layerNormGuardPeak(64) == (512 as Float).squareRoot())
+    #expect(Patches.layerNormGuardPeak(nil) == 8)
+    let peak = try #require(g.initializers.first { $0.key == "x__scaled__guard_peak" })
+    #expect(peak.dataType == DataType.float16)
   }
 }
 
