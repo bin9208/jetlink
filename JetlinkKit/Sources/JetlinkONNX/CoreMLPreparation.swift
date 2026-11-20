@@ -67,6 +67,37 @@ public enum CoreMLPreparation {
     }
   }
 
+  /// What a test build may try on the Hexagon NPU beyond what it ships,
+  /// each measured against the rest (the test app's experiment sweep).
+  public enum Experiment: String, CaseIterable, Sendable, Comparable {
+    /// Big weights as int8 with a DequantizeLinear (`int8Weights`). Not in
+    /// the sweep: N16 583 ms a run on a Galaxy Tab S9 (carrot.41).
+    case int8
+    /// The vision norms without their 1/32 (`prescaleVisionLayerNorm`), the
+    /// fix an 8 Elite (v79) needed; an 8 Gen 2 (v73) ran N16 right without
+    /// it, and its Muls were about 9% of the NPU's cycles (carrot.47).
+    case noVisionPrescale = "no-vision-prescale"
+    /// The 1/32 in the convolution's weight and bias where a vision norm
+    /// takes a convolution's output, rather than a Mul before the norm.
+    case foldVisionPrescale = "fold-vision-prescale"
+
+    public static func < (a: Experiment, b: Experiment) -> Bool { a.rawValue < b.rawValue }
+
+    /// "fold+int8", or "none".
+    public static func name(_ set: Set<Experiment>) -> String {
+      set.isEmpty ? "none" : set.sorted().map(\.rawValue).joined(separator: "+")
+    }
+
+    /// What the test app's sweep tries.
+    public static let swept: [Experiment] = [.noVisionPrescale, .foldVisionPrescale]
+
+    /// None, then each swept experiment alone: the two prescale ones are
+    /// alternatives (with no norm prescaled the fold has nothing to fold).
+    public static var combinations: [Set<Experiment>] {
+      [[]] + swept.map { [$0] }
+    }
+  }
+
   public struct Part: Sendable, Equatable {
     /// "vision", "policy" or "model"; the file is `<name>.onnx`.
     public let name: String
@@ -82,7 +113,7 @@ public enum CoreMLPreparation {
     public static func == (a: Report, b: Report) -> Bool {
       a.stripped == b.stripped && a.retypedImages == b.retypedImages && a.gathers == b.gathers && a.gemms == b.gemms
         && a.tiles == b.tiles && a.norms == b.norms && a.heads == b.heads && a.masks == b.masks && a.parts == b.parts
-        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.safeNorms == b.safeNorms && a.gelus == b.gelus && a.stateIO == b.stateIO && a.probes.map(\.name) == b.probes.map(\.name)
+        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.safeNorms == b.safeNorms && a.gelus == b.gelus && a.stateIO == b.stateIO && a.int8Weights == b.int8Weights && a.probes.map(\.name) == b.probes.map(\.name)
     }
     /// tinygrad layout ops bypassed.
     public let stripped: Int
@@ -116,6 +147,8 @@ public enum CoreMLPreparation {
     /// State queue pairs made fp16 at the graph's edge (`fp16StateIO`); 0
     /// unless the layout is `.hexagonWhole`.
     public var stateIO: Int = 0
+    /// Weights made int8 (`int8Weights`); 0 unless asked for.
+    public var int8Weights: Int = 0
     /// The tensors made graph outputs for a probe, in graph order, with the
     /// op that writes each (`Patches.addProbes`); empty unless asked for.
     public var probes: [(name: String, op: String)] = []
@@ -141,11 +174,13 @@ public enum CoreMLPreparation {
     source: URL, into directory: URL, layout: Layout,
     cacheKey: (String) -> String,
     progress: ((Double) -> Void)? = nil,
-    probes: ProbeRequest? = nil
+    probes: ProbeRequest? = nil,
+    experiments: Set<Experiment> = []
   ) throws -> Report {
     let data = try Data(contentsOf: source, options: .alwaysMapped)
     return try data.withUnsafeBytes { buf in
-      try prepare(Source(bytes: buf), into: directory, layout: layout, cacheKey: cacheKey, progress: progress, probes: probes)
+      try prepare(
+        Source(bytes: buf), into: directory, layout: layout, cacheKey: cacheKey, progress: progress, probes: probes, experiments: experiments)
     }
   }
 
@@ -153,11 +188,15 @@ public enum CoreMLPreparation {
     _ src: Source, into directory: URL, layout: Layout,
     cacheKey: (String) -> String,
     progress: ((Double) -> Void)?,
-    probes probeRequest: ProbeRequest? = nil
+    probes probeRequest: ProbeRequest? = nil,
+    experiments: Set<Experiment> = []
   ) throws -> Report {
     var (model, g) = try Decode.preparable(src)
 
     let stripped = try Patches.stripTinygradOps(&g, &model.opsets)
+    // Not for the Hexagon NPU either: kept uint8 there (carrot.38-test), the
+    // image queue's Slice, Concat and Gather left the NPU for the CPU, and
+    // N16 ran in 39.7 ms a frame instead of 33.5, further from the CPU's.
     let retyped = Patches.needsPatch(g)
     if retyped {
       try Patches.patchUint8Inputs(&g)
@@ -165,6 +204,7 @@ public enum CoreMLPreparation {
     var gathers = 0
     var gemms = 0
     var tiles = 0
+    var int8 = 0
     if layout != .plain {
       gathers = try Patches.normalizeGatherIndices(&g, src)
       gemms = try Patches.gemmWithTransposedWeight(&g, src)
@@ -188,7 +228,9 @@ public enum CoreMLPreparation {
       // Snapdragon 8 Gen 2 run N16 in 55 ms instead of about 40.
       norms = try Patches.prescaleLayerNorm(&g)
       heads = try Patches.headsInFP32(&g, src)
-      visionNorms = try Patches.prescaleVisionLayerNorm(&g)
+      if !experiments.contains(.noVisionPrescale) {
+        visionNorms = try Patches.prescaleVisionLayerNorm(&g, src, fold: experiments.contains(.foldVisionPrescale))
+      }
       stateIO = Patches.fp16StateIO(&g)
       // Not Patches.tanhGelu: QNN runs the native Gelu well. On a Snapdragon
       // 8 Gen 2 the tanh form took Light Speed 2 from 84 M NPU cycles a run
@@ -197,6 +239,9 @@ public enum CoreMLPreparation {
     if layout == .aneWhole || layout == .hexagonWhole {
       biasMasks = try Patches.additiveSoftmaxMasks(&g, src)
       masks = try Patches.finiteSoftmaxMasks(&g, src)
+    }
+    if layout == .hexagonWhole && experiments.contains(.int8) {
+      int8 = try Patches.int8Weights(&g, src)
     }
     var probed: [(name: String, op: String)] = []
     if let probeRequest {
@@ -226,6 +271,7 @@ public enum CoreMLPreparation {
     report.safeNorms = safeNorms
     report.gelus = gelus
     report.stateIO = stateIO
+    report.int8Weights = int8
     report.probes = probed
     return report
   }
