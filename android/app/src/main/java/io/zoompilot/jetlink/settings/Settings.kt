@@ -199,9 +199,18 @@ val NPU_EXPERIMENTS = listOf<Triple<String, String, String>>(
 /** The 8 Gen 2 speed experiments, the test app's alone. */
 val TEST_APP_ONLY_EXPERIMENTS = setOf("no-vision-prescale", "fold-vision-prescale")
 
-/** The experiments this app offers: the main app the precision ones only. */
-fun offeredExperiments(testApp: Boolean): List<Triple<String, String, String>> =
+/**
+ * N16's norm guards, an 8 Elite's (HTP v79) alone: on a Fold 7 the guard on the
+ * 18 hot norms took N16 from 0.75 m to 0.35 m from the CPU over road frames,
+ * but on a Tab S9 Ultra (8 Gen 2, v73) every guard made it far worse (0.39 m
+ * to 2.5 m, the residual one 5.7 m), so no other generation may drive with one.
+ */
+const val NORM_GUARD_HEXAGON = 79
+
+/** The experiments this app offers: the main app the precision ones only; the norm guards on an 8 Elite only. */
+fun offeredExperiments(testApp: Boolean, hexagon: Int? = Chip.hexagon): List<Triple<String, String, String>> =
     NPU_EXPERIMENTS.filter { testApp || it.first !in TEST_APP_ONLY_EXPERIMENTS }
+        .filter { !it.first.startsWith("norm-guard") || hexagon == NORM_GUARD_HEXAGON }
 
 class Settings(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("settings", Context.MODE_PRIVATE).also(::migrate)
