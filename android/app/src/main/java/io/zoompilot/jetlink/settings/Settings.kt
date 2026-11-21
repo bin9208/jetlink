@@ -161,20 +161,28 @@ data class HudSettings(
 
 /** The test app's NPU experiments: id, title, what it does. */
 val NPU_EXPERIMENTS = listOf<Triple<String, String, String>>(
-    // carrot.50-test: the precision candidates for N16 on an 8 Elite. carrot.49's
-    // guard at 8 (policy-norm-guard, 4x further from the CPU on a Y700) and
-    // safe-norms (0.71 m, 36 ms) are dropped from the list.
+    // carrot.52-test: the precision candidates for N16 on an 8 Elite. On a Fold 7
+    // over road frames norm-guard-224 took N16 from 0.75 m to 0.45 m; the
+    // one-Mul guards (carrot.50) only to 0.69 m and leave the list.
     Triple(
-        "norm-guard-224", "정책부 norm 가드 224",
-        "fp16 제곱이 넘치는 행(최대값 224 초과)만 줄입니다. 무작위 영상에서는 값이 그대로입니다.",
+        "norm-guard-224", "정책부 norm 가드 224 (전체)",
+        "정책부 norm 76개 모두에 가드. 도로 프레임 0.75→0.45m, 무작위 영상은 0.39→0.55m.",
     ),
     Triple(
-        "norm-guard-224-one", "정책부 norm 가드 224 (곱셈 하나)",
-        "같은 가드를 기존 1/8 곱셈 하나에 합칩니다(곱셈→LayerNorm 모양 유지).",
+        "norm-guard-res-224", "가드 224 (residual norm만)",
+        "Add에서 오는 넓은 norm에만 가드를 겁니다. 넘칠 일 없는 q/k norm은 그대로 둡니다.",
     ),
     Triple(
-        "norm-guard-128-one", "정책부 norm 가드 128 (곱셈 하나)",
-        "곱셈 하나로 합친 가드, 최대값 128 초과 행을 줄입니다.",
+        "norm-guard-hot-224", "가드 224 (넘치는 norm 18개만)",
+        "실제 도로에서 값이 커지는 N16 norm 18개에만 가드를 겁니다.",
+    ),
+    Triple(
+        "norm-guard-hot-192", "가드 192 (넘치는 norm 18개만)",
+        "위와 같고, 최대값 192를 넘는 행을 줄입니다.",
+    ),
+    Triple(
+        "norm-guard-hot-240", "가드 240 (넘치는 norm 18개만)",
+        "위와 같고, fp16 한도 바로 아래인 240을 넘는 행을 줄입니다.",
     ),
     // int8 weights (carrot.41-test): N16 583 ms a run on a Galaxy Tab S9, QNN
     // leaving the widened MatMuls to the CPU, and further from the CPU's. Dropped.

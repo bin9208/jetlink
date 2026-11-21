@@ -97,6 +97,16 @@ public enum CoreMLPreparation {
     case normGuard224One = "norm-guard-224-one"
     /// The same at a peak of 128.
     case normGuard128One = "norm-guard-128-one"
+    /// norm-guard-224 on the residual norms alone (an Add's output, 256+
+    /// wide): on a Fold 7 over road frames norm-guard-224 took N16 from 0.75 m
+    /// to 0.45 m, but 0.39 to 0.55 m on random bytes, with ops on 76 norms.
+    case normGuardRes224 = "norm-guard-res-224"
+    /// The guard on N16's 18 norms a road takes past 128 over 1/8, peak 224.
+    case normGuardHot224 = "norm-guard-hot-224"
+    /// The same, peak 192.
+    case normGuardHot192 = "norm-guard-hot-192"
+    /// The same, peak 240: closest under fp16's square (65504).
+    case normGuardHot240 = "norm-guard-hot-240"
 
     public static func < (a: Experiment, b: Experiment) -> Bool { a.rawValue < b.rawValue }
 
@@ -108,7 +118,7 @@ public enum CoreMLPreparation {
     /// What the sweep tries: the precision candidates for an 8 Elite's N16
     /// (carrot.50-test). The vision-prescale ones (carrot.48) were for an
     /// 8 Gen 2's speed and stay switchable but out of the sweep.
-    public static let swept: [Experiment] = [.normGuard224, .normGuard224One, .normGuard128One]
+    public static let swept: [Experiment] = [.normGuard224, .normGuardRes224, .normGuardHot224, .normGuardHot192, .normGuardHot240]
 
     /// None, then each swept experiment alone.
     public static var combinations: [Set<Experiment>] {
@@ -261,6 +271,14 @@ public enum CoreMLPreparation {
         guardedNorms = Patches.guardPolicyPrescale(&g, peak: 224)
       } else if experiments.contains(.normGuard128One) {
         guardedNorms = Patches.guardPolicyPrescale(&g, peak: 128)
+      } else if experiments.contains(.normGuardRes224) {
+        guardedNorms = Patches.guardPolicyLayerNorm(&g, fixedPeak: 224, only: .residual)
+      } else if experiments.contains(.normGuardHot224) {
+        guardedNorms = Patches.guardPolicyLayerNorm(&g, fixedPeak: 224, only: .named(Patches.n16HotNorms))
+      } else if experiments.contains(.normGuardHot192) {
+        guardedNorms = Patches.guardPolicyLayerNorm(&g, fixedPeak: 192, only: .named(Patches.n16HotNorms))
+      } else if experiments.contains(.normGuardHot240) {
+        guardedNorms = Patches.guardPolicyLayerNorm(&g, fixedPeak: 240, only: .named(Patches.n16HotNorms))
       }
       if experiments.contains(.safeNorms) {
         safeNorms = Patches.safeLayerNorm(&g)

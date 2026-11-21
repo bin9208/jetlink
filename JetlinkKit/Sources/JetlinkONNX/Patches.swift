@@ -574,12 +574,50 @@ enum Patches {
   /// epsilon, about 1e-4 of those rows' variance at most.
   static var policyPrescaleConst: String { "__layernorm_prescale_\(layerNormPrescale)" }
 
+  /// Which of the policy's prescaled norms `guardPolicyLayerNorm` guards.
+  enum GuardSelection: Sendable {
+    /// Every one (carrot.49/50).
+    case all
+    /// Those reading the residual stream: an Add's output (or a reshape of
+    /// one) at least 256 wide. A query or key norm (288 x 64, from a Split)
+    /// never gets past fp16 on a road and keeps the shipped norm as it is.
+    case residual
+    /// Those named: on a PC over 40 real road frames N16's norms whose input
+    /// over 1/8 peaked past 128 (`n16HotNorms`).
+    case named(Set<String>)
+
+    func takes(norm: String, feeder: String?, width: Int64?) -> Bool {
+      switch self {
+      case .all: true
+      case .residual: (feeder == "Add" || feeder?.hasSuffix("<Add") == true) && (width ?? 0) >= 256
+      case .named(let names): names.contains(norm)
+      }
+    }
+  }
+
+  /// carrot's N16 (01effc679eb46d60): the policy norms whose input over 1/8
+  /// peaked past 128 on a PC over real road frames (past 224, fp16's square,
+  /// for 67, 70, 71, 74, 75, 78 and their second copies, and 54); the rest
+  /// stay under 8.
+  static let n16HotNorms: Set<String> = Set(
+    [54, 57, 63, 66, 67, 70, 71, 74, 75, 78, 86, 89, 90, 93, 94, 97, 98, 101].map { "node_layer_norm_\($0)" })
+
   /// `fixedPeak` instead of `layerNormGuardPeak`: a high one (224) touches
   /// only the rows past fp16's square, so on the benchmark's random bytes
   /// the values are the shipped ones and only the ops are new (carrot.50-test:
   /// the guard at 8 put N16 on a Y700 4x further from the CPU than without).
-  static func guardPolicyLayerNorm(_ g: inout Graph, fixedPeak: Float? = nil) -> Int {
+  static func guardPolicyLayerNorm(_ g: inout Graph, fixedPeak: Float? = nil, only select: GuardSelection = .all) -> Int {
     let policyConst = policyPrescaleConst
+    // what writes each norm's own input, a reshaping op looked through once
+    var producer: [String: Node] = [:]
+    for node in g.nodes { for o in node.outputs { producer[o] = node } }
+    func feeder(_ x: String) -> String? {
+        guard let p = producer[x] else { return nil }
+        if ["Transpose", "Reshape", "Squeeze", "Unsqueeze"].contains(p.op), let i = p.inputs.first, let q = producer[i] {
+            return "\(p.op)<\(q.op)"
+        }
+        return p.op
+    }
     var policyScaled = Set<String>()
     for node in g.nodes where node.op == "Mul" && node.inputs.count == 2 && node.inputs[1] == policyConst {
       if let out = node.outputs.first { policyScaled.insert(out) }
@@ -604,6 +642,17 @@ enum Patches {
         new.append(node)
         continue
       }
+      let original = x.hasSuffix("__scaled") ? String(x.dropLast("__scaled".count)) : x
+      // the Mul's output has no value info; its input, the norm's own, does
+      let shape = dims[x] ?? dims[original]
+      var d: Int64? = nil
+      if let shape, shape.count >= Int(-axis), shape.suffix(Int(-axis)).allSatisfy({ $0 > 0 }) {
+        d = shape.suffix(Int(-axis)).reduce(1, *)
+      }
+      guard select.takes(norm: node.name ?? "", feeder: feeder(original), width: d) else {
+        new.append(node)
+        continue
+      }
       if let y = guarded[x] {
         node.inputs[0] = y
         new.append(node)
@@ -611,12 +660,6 @@ enum Patches {
         continue
       }
       let p = "\(x)__guard"
-      // the Mul's output has no value info; its input, the norm's own, does
-      let shape = dims[x] ?? (x.hasSuffix("__scaled") ? dims[String(x.dropLast("__scaled".count))] : nil)
-      var d: Int64? = nil
-      if let shape, shape.count >= Int(-axis), shape.suffix(Int(-axis)).allSatisfy({ $0 > 0 }) {
-        d = shape.suffix(Int(-axis)).reduce(1, *)
-      }
       let peak = fixedPeak ?? layerNormGuardPeak(d)
       let axes = "\(p)_axes"
       var t = int64Tensor(Array(axis...(-1)), axes)

@@ -153,7 +153,7 @@ import Testing
   @Test("The sweep tries none and each precision experiment alone, never int8 or the vision-prescale ones")
   func sweepsThePrecisionExperiments() {
     let sets = CoreMLPreparation.Experiment.combinations
-    #expect(sets == [[], [.normGuard224], [.normGuard224One], [.normGuard128One]])
+    #expect(sets == [[], [.normGuard224], [.normGuardRes224], [.normGuardHot224], [.normGuardHot192], [.normGuardHot240]])
     #expect(CoreMLPreparation.Experiment.name([.foldVisionPrescale]) == "fold-vision-prescale")
     #expect(CoreMLPreparation.Experiment.name([.policyNormGuard]) == "policy-norm-guard")
   }
@@ -181,6 +181,32 @@ import Testing
     #expect(Patches.layerNormGuardPeak(nil) == 8)
     let peak = try #require(g.initializers.first { $0.key == "x__scaled__guard_peak" })
     #expect(peak.dataType == DataType.float16)
+  }
+
+  @Test("The residual selection guards a norm reading an Add 512 wide, not a query norm from a Split; a named one only its names")
+  func guardSelections() throws {
+    func graph() -> Graph {
+      var g = Graph()
+      g.inputs = [ValueInfo.tensor("a", DataType.float16, [1, 288, 512]), ValueInfo.tensor("b", DataType.float16, [1, 288, 512])]
+      g.valueInfo = [ValueInfo.tensor("r", DataType.float16, [1, 288, 512]), ValueInfo.tensor("q", DataType.float16, [1, 8, 288, 64])]
+      g.nodes = [
+        Node(inputs: ["a", "b"], outputs: ["r"], name: "add", opType: "Add"),
+        Node(inputs: ["a"], outputs: ["q"], name: "split", opType: "Split"),
+        Node(inputs: ["r", Patches.policyPrescaleConst], outputs: ["r__scaled"], name: "r__prescale", opType: "Mul"),
+        Node(inputs: ["q", Patches.policyPrescaleConst], outputs: ["q__scaled"], name: "q__prescale", opType: "Mul"),
+        Node(inputs: ["r__scaled", "w", "b"], outputs: ["y"], name: "node_layer_norm_67", opType: "LayerNormalization"),
+        Node(inputs: ["q__scaled", "w", "b"], outputs: ["z"], name: "node_layer_norm_77", opType: "LayerNormalization"),
+      ]
+      return g
+    }
+    var g = graph()
+    #expect(Patches.guardPolicyLayerNorm(&g, fixedPeak: 224, only: .residual) == 1)
+    #expect(g.nodes.first { $0.name == "node_layer_norm_67" }?.inputs[0] == "r__scaled__guard_x")
+    #expect(g.nodes.first { $0.name == "node_layer_norm_77" }?.inputs[0] == "q__scaled")
+    var h = graph()
+    #expect(Patches.guardPolicyLayerNorm(&h, fixedPeak: 224, only: .named(["node_layer_norm_77"])) == 1)
+    #expect(h.nodes.first { $0.name == "node_layer_norm_77" }?.inputs[0] == "q__scaled__guard_x")
+    #expect(Patches.n16HotNorms.count == 18 && Patches.n16HotNorms.contains("node_layer_norm_101"))
   }
 
   @Test("Folded, the guard replaces the 1/8 of the policy's prescale Mul with peak / max(row peak, 8 peak)")
