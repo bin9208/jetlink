@@ -110,6 +110,19 @@ public enum CoreMLPreparation {
 
     public static func < (a: Experiment, b: Experiment) -> Bool { a.rawValue < b.rawValue }
 
+    /// The guards that pick N16's norms by name (`Patches.n16HotNorms`).
+    public static let hotNormGuards: Set<Experiment> = [.normGuardHot224, .normGuardHot192, .normGuardHot240]
+
+    /// What a model is prepared with: the hot-norm guards for N16 alone, so
+    /// another model whose norms happen to share those names keeps the shipped
+    /// graph. The main app turns norm-guard-hot-192 on by default on an 8 Elite
+    /// (carrot.54). A phone names each model by its sha256's first 16 hex; a
+    /// file named otherwise (a PC check, JETLINK_PREPARE) keeps what was asked.
+    public static func applicable(_ set: Set<Experiment>, modelStem: String) -> Set<Experiment> {
+      let bySha = modelStem.count == 16 && modelStem.allSatisfy(\.isHexDigit)
+      return !bySha || modelStem == Patches.n16Stem ? set : set.subtracting(hotNormGuards)
+    }
+
     /// "fold+int8", or "none".
     public static func name(_ set: Set<Experiment>) -> String {
       set.isEmpty ? "none" : set.sorted().map(\.rawValue).joined(separator: "+")
@@ -209,6 +222,7 @@ public enum CoreMLPreparation {
     experiments: Set<Experiment> = []
   ) throws -> Report {
     let data = try Data(contentsOf: source, options: .alwaysMapped)
+    let experiments = Experiment.applicable(experiments, modelStem: source.deletingPathExtension().lastPathComponent)
     return try data.withUnsafeBytes { buf in
       try prepare(
         Source(bytes: buf), into: directory, layout: layout, cacheKey: cacheKey, progress: progress, probes: probes, experiments: experiments)

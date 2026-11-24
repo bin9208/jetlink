@@ -599,6 +599,9 @@ enum Patches {
   /// peaked past 128 on a PC over real road frames (past 224, fp16's square,
   /// for 67, 70, 71, 74, 75, 78 and their second copies, and 54); the rest
   /// stay under 8.
+  /// N16's model file stem: its sha256's first 16 hex.
+  static let n16Stem = "01effc679eb46d60"
+
   static let n16HotNorms: Set<String> = Set(
     [54, 57, 63, 66, 67, 70, 71, 74, 75, 78, 86, 89, 90, 93, 94, 97, 98, 101].map { "node_layer_norm_\($0)" })
 

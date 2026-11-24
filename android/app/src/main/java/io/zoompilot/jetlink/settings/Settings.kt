@@ -177,8 +177,9 @@ val NPU_EXPERIMENTS = listOf<Triple<String, String, String>>(
         "실제 도로에서 값이 커지는 N16 norm 18개에만 가드를 겁니다.",
     ),
     Triple(
-        "norm-guard-hot-192", "가드 192 (넘치는 norm 18개만)",
-        "위와 같고, 최대값 192를 넘는 행을 줄입니다.",
+        "norm-guard-hot-192", "N16 norm 가드 192 (넘치는 norm 18개만)",
+        "실제 도로에서 fp16을 넘는 N16 norm 18개의 큰 행만 192로 줄여 커브 편향을 줄입니다. " +
+            "8 Elite 정식 앱 기본값. N16에만 적용됩니다.",
     ),
     Triple(
         "norm-guard-hot-240", "가드 240 (넘치는 norm 18개만)",
@@ -196,9 +197,6 @@ val NPU_EXPERIMENTS = listOf<Triple<String, String, String>>(
     ),
 )
 
-/** The 8 Gen 2 speed experiments, the test app's alone. */
-val TEST_APP_ONLY_EXPERIMENTS = setOf("no-vision-prescale", "fold-vision-prescale")
-
 /**
  * N16's norm guards, an 8 Elite's (HTP v79) alone: on a Fold 7 the guard on the
  * 18 hot norms took N16 from 0.75 m to 0.35 m from the CPU over road frames,
@@ -207,9 +205,17 @@ val TEST_APP_ONLY_EXPERIMENTS = setOf("no-vision-prescale", "fold-vision-prescal
  */
 const val NORM_GUARD_HEXAGON = 79
 
-/** The experiments this app offers: the main app the precision ones only; the norm guards on an 8 Elite only. */
+/**
+ * The main app's one experiment (carrot.54): N16's guard on its 18 hot norms
+ * at 192, on a Fold 7 over road frames 0.75 m to 0.35 m from the CPU at the
+ * plan's end for about 1 ms, and driven there with less lean in curves. On by
+ * default on an 8 Elite ([migratedExperiments]); the switch turns it off.
+ */
+const val MAIN_APP_EXPERIMENT = "norm-guard-hot-192"
+
+/** The experiments this app offers: the main app [MAIN_APP_EXPERIMENT] alone; the norm guards on an 8 Elite only. */
 fun offeredExperiments(testApp: Boolean, hexagon: Int? = Chip.hexagon): List<Triple<String, String, String>> =
-    NPU_EXPERIMENTS.filter { testApp || it.first !in TEST_APP_ONLY_EXPERIMENTS }
+    NPU_EXPERIMENTS.filter { if (testApp) true else it.first == MAIN_APP_EXPERIMENT }
         .filter { !it.first.startsWith("norm-guard") || hexagon == NORM_GUARD_HEXAGON }
 
 class Settings(context: Context) {
@@ -274,16 +280,28 @@ class Settings(context: Context) {
         private const val HUD_ROTATE_180 = "hudRotate180"
         private const val HUD_MIRROR = "hudMirror"
 
-        /** Settings from before Automatic are version 1. */
-        private const val CURRENT = 2
+        /** Settings from before Automatic are version 1; from before the main app's N16 guard (carrot.54), 2. */
+        private const val CURRENT = 3
 
         /** Brings settings stored by an older app up to [CURRENT], once. */
         private fun migrate(prefs: SharedPreferences) {
-            if (prefs.getInt(VERSION, 1) >= CURRENT) return
+            val from = prefs.getInt(VERSION, 1)
+            if (from >= CURRENT) return
             val edit = prefs.edit().putInt(VERSION, CURRENT)
-            migratedProcessor(prefs.getString(PROCESSOR, null))?.let { edit.putString(PROCESSOR, it) }
+            if (from < 2) migratedProcessor(prefs.getString(PROCESSOR, null))?.let { edit.putString(PROCESSOR, it) }
+            migratedExperiments(
+                prefs.getStringSet(EXPERIMENTS, null), io.zoompilot.jetlink.BuildConfig.CHANNEL == "stable", Chip.hexagon,
+            )?.let { edit.putStringSet(EXPERIMENTS, it) }
             edit.apply()
         }
+
+        /**
+         * carrot.54: the main app on an 8 Elite turns [MAIN_APP_EXPERIMENT] on,
+         * once, beside what is stored; turned off later it stays off. Null
+         * leaves what is stored (the test app, any other chip).
+         */
+        fun migratedExperiments(stored: Set<String>?, stable: Boolean, hexagon: Int?): Set<String>? =
+            if (stable && hexagon == NORM_GUARD_HEXAGON) (stored ?: emptySet()) + MAIN_APP_EXPERIMENT else null
 
         /**
          * A processor stored before Automatic existed: `gpu` was the default

@@ -158,6 +158,15 @@ import Testing
     #expect(CoreMLPreparation.Experiment.name([.policyNormGuard]) == "policy-norm-guard")
   }
 
+  @Test("The hot-norm guards are N16's alone among the phone's models; a hand-named file keeps what was asked")
+  func hotNormGuardsAreN16s() {
+    let hot: Set<CoreMLPreparation.Experiment> = [.normGuardHot192]
+    #expect(CoreMLPreparation.Experiment.applicable(hot, modelStem: "01effc679eb46d60") == hot)
+    #expect(CoreMLPreparation.Experiment.applicable(hot, modelStem: "ae90227c1ba51d32") == [])
+    #expect(CoreMLPreparation.Experiment.applicable([.normGuard224, .normGuardHot240], modelStem: "ae90227c1ba51d32") == [.normGuard224])
+    #expect(CoreMLPreparation.Experiment.applicable(hot, modelStem: "n16") == hot)
+  }
+
   @Test("A guarded policy norm reads its prescaled input times peak / max(row peak, peak); a vision norm is left alone")
   func policyNormsGetARowGuard() throws {
     var g = Graph()
