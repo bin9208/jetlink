@@ -91,6 +91,12 @@ class ServerController(private val context: Context, private val scope: Coroutin
         // the test app tries the NPU's shared memory; the main app once a phone that has it has run it
         put("npu_shared_memory", io.zoompilot.jetlink.BuildConfig.CHANNEL == "test")
         put("keep_cpu_warm", settings.keepCpuAwake)
+        // the NPU experiments this app offers (the main app the precision ones,
+        // carrot.49), and every one compared after a benchmark
+        val offered = io.zoompilot.jetlink.settings.offeredExperiments(io.zoompilot.jetlink.BuildConfig.CHANNEL == "test")
+        put("experiments", kotlinx.serialization.json.JsonArray(
+            settings.experiments.filter { id -> offered.any { it.first == id } }.sorted().map { kotlinx.serialization.json.JsonPrimitive(it) }))
+        put("experiment_sweep", offered.isNotEmpty())
         put("port", settings.port)
         // Bench tools reach the server over Wi-Fi or `adb forward`; the comma
         // comes over USB.
@@ -188,6 +194,30 @@ class ServerController(private val context: Context, private val scope: Coroutin
             }
         }
         reply
+    }
+    /**
+     * A set of road frames the person picked (a .roadframes file, the camera
+     * frames of a drive as the comma sends them), for the benchmark's CPU
+     * comparison when this phone has none of its own for the model: copied
+     * where the server reads them (JetlinkServer RoadFrames.importedName).
+     */
+    suspend fun importRoadFrames(uri: Uri): Reply = withContext(Dispatchers.IO) {
+        val dir = File(cacheDirectory, "road-frames").apply { mkdirs() }
+        val part = File(dir, "imported.roadframes.part")
+        val ok = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { input -> part.outputStream().use { input.copyTo(it, 1 shl 20) } }
+        }.getOrNull() != null
+        // "FRLJ": RoadFrames.magic, little endian
+        val magic = if (ok && part.length() > 16) part.inputStream().use { s -> ByteArray(4).also { s.read(it) } } else null
+        if (magic == null || String(magic, Charsets.US_ASCII) != "FRLJ") {
+            part.delete()
+            return@withContext Reply(false, "도로 프레임 파일이 아닙니다.")
+        }
+        if (!part.renameTo(File(dir, "imported.roadframes"))) {
+            part.delete()
+            return@withContext Reply(false, "파일을 저장하지 못했습니다.")
+        }
+        Reply(true, null)
     }
     suspend fun benchmark(seconds: Int) = command("benchmark", "seconds" to seconds)
     suspend fun cancelBenchmark() = command("cancel_benchmark")

@@ -5,6 +5,8 @@ import io.zoompilot.jetlink.update.UpdateCenter
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
@@ -77,6 +79,7 @@ import io.zoompilot.jetlink.ui.components.CardSpacing
 import io.zoompilot.jetlink.ui.components.FormFooter
 import io.zoompilot.jetlink.ui.components.FormSection
 import io.zoompilot.jetlink.ui.components.RowDivider
+import io.zoompilot.jetlink.settings.offeredExperiments
 import io.zoompilot.jetlink.ui.components.SwitchRow
 import io.zoompilot.jetlink.ui.components.ValueRow
 import io.zoompilot.jetlink.ui.components.rememberWifiAddress
@@ -114,6 +117,8 @@ class SettingsActions(
     val stopServer: () -> Unit = {},
     val startServer: () -> Unit = {},
     val restartServer: () -> Unit = {},
+    /** Picks a .roadframes file for the benchmark's comparison (NPU 실험). */
+    val importRoadFrames: () -> Unit = {},
 )
 
 /**
@@ -147,6 +152,18 @@ fun SettingsScreen(graph: AppGraph, openConnect: () -> Unit, openLogs: () -> Uni
         accelerator = snapshot.engine.takeIf { it.state == "ready" }?.accelerator,
         hud = hud,
     )
+    val scope = rememberCoroutineScope()
+    val roadFramesPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val reply = graph.server.importRoadFrames(uri)
+                Toast.makeText(
+                    context, if (reply.ok) "도로 프레임을 가져왔습니다. 벤치마크에서 비교합니다." else (reply.error ?: "가져오지 못했습니다."),
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+    }
     val actions = SettingsActions(
         update = graph.settings::update,
         openConnect = openConnect,
@@ -154,6 +171,7 @@ fun SettingsScreen(graph: AppGraph, openConnect: () -> Unit, openLogs: () -> Uni
         stopServer = { ServerService.start(context, ServerService.ACTION_STOP) },
         startServer = { ServerService.start(context) },
         restartServer = { graph.restartServer(context) },
+        importRoadFrames = { roadFramesPicker.launch(arrayOf("*/*")) },
     )
     Scaffold(
         containerColor = JetlinkTheme.colors.grouped,
@@ -332,6 +350,28 @@ private fun Performance(values: SettingsValues, info: SettingsInfo, actions: Set
             "Keep CPU Awake", values.keepCpuAwake, { on -> actions.update { it.copy(keepCpuAwake = on) } },
             supporting = "Holds the CPU's clocks up between frames.",
         )
+    }
+    // what the NPU model is built with; a benchmark compares each one (both apps since carrot.49)
+    val offered = offeredExperiments(io.zoompilot.jetlink.BuildConfig.CHANNEL == "test")
+    if (values.processor.resolved().usesQnn && offered.isNotEmpty()) {
+        FormSection(
+            "NPU 실험 (시험 기능)",
+            footer = { FormFooter("바꾸면 서버가 다시 시작되고 켠 것으로 주행 모델을 다시 만듭니다(처음 한 번 1~2분). 벤치마크 뒤에는 각 실험을 따로 만들어 속도와 CPU 대비 정확도를 로그에 남깁니다(몇 분 걸림). 한 번 주행한 뒤 벤치마크하면 그 주행의 도로 프레임으로도 비교합니다(프레임은 이 기기에만 저장).") },
+        ) {
+            ActionRow("도로 프레임 가져오기", actions.importRoadFrames)
+            RowDivider()
+            offered.forEachIndexed { i, (id, title, about) ->
+                if (i > 0) RowDivider()
+                SwitchRow(
+                    title, id in values.experiments,
+                    { on ->
+                        actions.update { it.copy(experiments = if (on) it.experiments + id else it.experiments - id) }
+                        actions.restartServer()
+                    },
+                    supporting = about,
+                )
+            }
+        }
     }
 }
 

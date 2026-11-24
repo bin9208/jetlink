@@ -67,6 +67,65 @@ public enum CoreMLPreparation {
     }
   }
 
+  /// What a test build may try on the Hexagon NPU beyond what it ships,
+  /// each measured against the rest (the test app's experiment sweep).
+  public enum Experiment: String, CaseIterable, Sendable, Comparable {
+    /// Big weights as int8 with a DequantizeLinear (`int8Weights`). Not in
+    /// the sweep: N16 583 ms a run on a Galaxy Tab S9 (carrot.41).
+    case int8
+    /// The vision norms without their 1/32 (`prescaleVisionLayerNorm`), the
+    /// fix an 8 Elite (v79) needed; an 8 Gen 2 (v73) ran N16 right without
+    /// it, and its Muls were about 9% of the NPU's cycles (carrot.47).
+    case noVisionPrescale = "no-vision-prescale"
+    /// The 1/32 in the convolution's weight and bias where a vision norm
+    /// takes a convolution's output, rather than a Mul before the norm.
+    case foldVisionPrescale = "fold-vision-prescale"
+    /// The policy's norms (prescaled by 1/8) given a row guard that brings a
+    /// row's peak under fp16's reach (`guardPolicyLayerNorm`): on a real road
+    /// N16's temporal residual norms overflow fp16 at 1/8, on the benchmark's
+    /// random bytes they do not. On a Y700 (carrot.49) 4x further from the
+    /// CPU on random bytes than without: out of the sweep.
+    case policyNormGuard = "policy-norm-guard"
+    /// Every norm in carrot.23's fp16-safe form (`safeLayerNorm`), after the
+    /// prescales. On a Y700 (carrot.49) 0.71 m from the CPU, 36 ms: out.
+    case safeNorms = "safe-norms"
+    /// The guard with a peak of 224: only rows past fp16's square are
+    /// scaled, so on random bytes only the ops differ from what ships.
+    case normGuard224 = "norm-guard-224"
+    /// The guard folded into the 1/8 prescale's one Mul, peak 224
+    /// (`guardPolicyPrescale`): the norm still reads a Mul's output.
+    case normGuard224One = "norm-guard-224-one"
+    /// The same at a peak of 128.
+    case normGuard128One = "norm-guard-128-one"
+    /// norm-guard-224 on the residual norms alone (an Add's output, 256+
+    /// wide): on a Fold 7 over road frames norm-guard-224 took N16 from 0.75 m
+    /// to 0.45 m, but 0.39 to 0.55 m on random bytes, with ops on 76 norms.
+    case normGuardRes224 = "norm-guard-res-224"
+    /// The guard on N16's 18 norms a road takes past 128 over 1/8, peak 224.
+    case normGuardHot224 = "norm-guard-hot-224"
+    /// The same, peak 192.
+    case normGuardHot192 = "norm-guard-hot-192"
+    /// The same, peak 240: closest under fp16's square (65504).
+    case normGuardHot240 = "norm-guard-hot-240"
+
+    public static func < (a: Experiment, b: Experiment) -> Bool { a.rawValue < b.rawValue }
+
+    /// "fold+int8", or "none".
+    public static func name(_ set: Set<Experiment>) -> String {
+      set.isEmpty ? "none" : set.sorted().map(\.rawValue).joined(separator: "+")
+    }
+
+    /// What the sweep tries: the precision candidates for an 8 Elite's N16
+    /// (carrot.50-test). The vision-prescale ones (carrot.48) were for an
+    /// 8 Gen 2's speed and stay switchable but out of the sweep.
+    public static let swept: [Experiment] = [.normGuard224, .normGuardRes224, .normGuardHot224, .normGuardHot192, .normGuardHot240]
+
+    /// None, then each swept experiment alone.
+    public static var combinations: [Set<Experiment>] {
+      [[]] + swept.map { [$0] }
+    }
+  }
+
   public struct Part: Sendable, Equatable {
     /// "vision", "policy" or "model"; the file is `<name>.onnx`.
     public let name: String
@@ -82,7 +141,7 @@ public enum CoreMLPreparation {
     public static func == (a: Report, b: Report) -> Bool {
       a.stripped == b.stripped && a.retypedImages == b.retypedImages && a.gathers == b.gathers && a.gemms == b.gemms
         && a.tiles == b.tiles && a.norms == b.norms && a.heads == b.heads && a.masks == b.masks && a.parts == b.parts
-        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.safeNorms == b.safeNorms && a.gelus == b.gelus && a.stateIO == b.stateIO && a.probes.map(\.name) == b.probes.map(\.name)
+        && a.biasMasks == b.biasMasks && a.visionNorms == b.visionNorms && a.safeNorms == b.safeNorms && a.guardedNorms == b.guardedNorms && a.gelus == b.gelus && a.stateIO == b.stateIO && a.int8Weights == b.int8Weights && a.probes.map(\.name) == b.probes.map(\.name)
     }
     /// tinygrad layout ops bypassed.
     public let stripped: Int
@@ -110,12 +169,17 @@ public enum CoreMLPreparation {
     /// LayerNormalizations in their fp16-safe form (`safeLayerNorm`); 0
     /// unless the layout is `.hexagonWhole`.
     public var safeNorms: Int = 0
+    /// Policy LayerNormalizations given a row guard (`guardPolicyLayerNorm`);
+    /// 0 unless the experiment asks for it.
+    public var guardedNorms: Int = 0
     /// Exact GELUs made their tanh form (`tanhGelu`); 0 unless the layout is
     /// `.hexagonWhole`.
     public var gelus: Int = 0
     /// State queue pairs made fp16 at the graph's edge (`fp16StateIO`); 0
     /// unless the layout is `.hexagonWhole`.
     public var stateIO: Int = 0
+    /// Weights made int8 (`int8Weights`); 0 unless asked for.
+    public var int8Weights: Int = 0
     /// The tensors made graph outputs for a probe, in graph order, with the
     /// op that writes each (`Patches.addProbes`); empty unless asked for.
     public var probes: [(name: String, op: String)] = []
@@ -141,11 +205,13 @@ public enum CoreMLPreparation {
     source: URL, into directory: URL, layout: Layout,
     cacheKey: (String) -> String,
     progress: ((Double) -> Void)? = nil,
-    probes: ProbeRequest? = nil
+    probes: ProbeRequest? = nil,
+    experiments: Set<Experiment> = []
   ) throws -> Report {
     let data = try Data(contentsOf: source, options: .alwaysMapped)
     return try data.withUnsafeBytes { buf in
-      try prepare(Source(bytes: buf), into: directory, layout: layout, cacheKey: cacheKey, progress: progress, probes: probes)
+      try prepare(
+        Source(bytes: buf), into: directory, layout: layout, cacheKey: cacheKey, progress: progress, probes: probes, experiments: experiments)
     }
   }
 
@@ -153,11 +219,15 @@ public enum CoreMLPreparation {
     _ src: Source, into directory: URL, layout: Layout,
     cacheKey: (String) -> String,
     progress: ((Double) -> Void)?,
-    probes probeRequest: ProbeRequest? = nil
+    probes probeRequest: ProbeRequest? = nil,
+    experiments: Set<Experiment> = []
   ) throws -> Report {
     var (model, g) = try Decode.preparable(src)
 
     let stripped = try Patches.stripTinygradOps(&g, &model.opsets)
+    // Not for the Hexagon NPU either: kept uint8 there (carrot.38-test), the
+    // image queue's Slice, Concat and Gather left the NPU for the CPU, and
+    // N16 ran in 39.7 ms a frame instead of 33.5, further from the CPU's.
     let retyped = Patches.needsPatch(g)
     if retyped {
       try Patches.patchUint8Inputs(&g)
@@ -165,6 +235,7 @@ public enum CoreMLPreparation {
     var gathers = 0
     var gemms = 0
     var tiles = 0
+    var int8 = 0
     if layout != .plain {
       gathers = try Patches.normalizeGatherIndices(&g, src)
       gemms = try Patches.gemmWithTransposedWeight(&g, src)
@@ -176,6 +247,7 @@ public enum CoreMLPreparation {
     var biasMasks = 0
     var visionNorms = 0
     var safeNorms = 0
+    var guardedNorms = 0
     var gelus = 0
     var stateIO = 0
     if layout == .aneWhole {
@@ -188,7 +260,29 @@ public enum CoreMLPreparation {
       // Snapdragon 8 Gen 2 run N16 in 55 ms instead of about 40.
       norms = try Patches.prescaleLayerNorm(&g)
       heads = try Patches.headsInFP32(&g, src)
-      visionNorms = try Patches.prescaleVisionLayerNorm(&g)
+      if !experiments.contains(.noVisionPrescale) {
+        visionNorms = try Patches.prescaleVisionLayerNorm(&g, src, fold: experiments.contains(.foldVisionPrescale))
+      }
+      if experiments.contains(.policyNormGuard) {
+        guardedNorms = Patches.guardPolicyLayerNorm(&g)
+      } else if experiments.contains(.normGuard224) {
+        guardedNorms = Patches.guardPolicyLayerNorm(&g, fixedPeak: 224)
+      } else if experiments.contains(.normGuard224One) {
+        guardedNorms = Patches.guardPolicyPrescale(&g, peak: 224)
+      } else if experiments.contains(.normGuard128One) {
+        guardedNorms = Patches.guardPolicyPrescale(&g, peak: 128)
+      } else if experiments.contains(.normGuardRes224) {
+        guardedNorms = Patches.guardPolicyLayerNorm(&g, fixedPeak: 224, only: .residual)
+      } else if experiments.contains(.normGuardHot224) {
+        guardedNorms = Patches.guardPolicyLayerNorm(&g, fixedPeak: 224, only: .named(Patches.n16HotNorms))
+      } else if experiments.contains(.normGuardHot192) {
+        guardedNorms = Patches.guardPolicyLayerNorm(&g, fixedPeak: 192, only: .named(Patches.n16HotNorms))
+      } else if experiments.contains(.normGuardHot240) {
+        guardedNorms = Patches.guardPolicyLayerNorm(&g, fixedPeak: 240, only: .named(Patches.n16HotNorms))
+      }
+      if experiments.contains(.safeNorms) {
+        safeNorms = Patches.safeLayerNorm(&g)
+      }
       stateIO = Patches.fp16StateIO(&g)
       // Not Patches.tanhGelu: QNN runs the native Gelu well. On a Snapdragon
       // 8 Gen 2 the tanh form took Light Speed 2 from 84 M NPU cycles a run
@@ -197,6 +291,9 @@ public enum CoreMLPreparation {
     if layout == .aneWhole || layout == .hexagonWhole {
       biasMasks = try Patches.additiveSoftmaxMasks(&g, src)
       masks = try Patches.finiteSoftmaxMasks(&g, src)
+    }
+    if layout == .hexagonWhole && experiments.contains(.int8) {
+      int8 = try Patches.int8Weights(&g, src)
     }
     var probed: [(name: String, op: String)] = []
     if let probeRequest {
@@ -224,8 +321,10 @@ public enum CoreMLPreparation {
     report.biasMasks = biasMasks
     report.visionNorms = visionNorms
     report.safeNorms = safeNorms
+    report.guardedNorms = guardedNorms
     report.gelus = gelus
     report.stateIO = stateIO
+    report.int8Weights = int8
     report.probes = probed
     return report
   }

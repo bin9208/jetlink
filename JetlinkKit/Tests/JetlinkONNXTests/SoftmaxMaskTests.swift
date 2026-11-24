@@ -106,6 +106,127 @@ import Testing
     // and once is enough
     #expect(try Patches.prescaleVisionLayerNorm(&g) == 0)
   }
+
+  @Test("Folded, a norm after a convolution takes the 1/32 in the convolution's weight and bias; any other keeps its Mul")
+  func foldsTheDivisionIntoTheConvolution() throws {
+    var b = OnnxGraphBuilder()
+    b.input("x", DataType.float16, [1, 2, 3, 3])
+    b.fp16("w", [2, 1, 1, 1], [64, -0.5])
+    b.fp16("cb", [2], [32, 1])
+    b.node("Conv", ["x", "w", "cb"], ["c"], [.int("group", 2)])
+    b.node("Transpose", ["c"], ["t"], [.ints("perm", [0, 2, 3, 1])])
+    b.valueInfo("t", DataType.float16, [1, 3, 3, 2])
+    b.fp16("s", [2], [1, 1])
+    b.fp16("z", [2], [0, 0])
+    b.node("LayerNormalization", ["t", "s", "z"], ["y"], [.floatValue("epsilon", 1e-5), .int("axis", -1)])
+    // a norm whose input is no convolution's keeps its Mul
+    b.input("u", DataType.float16, [1, 4, 2])
+    b.valueInfo("u", DataType.float16, [1, 4, 2])
+    b.node("LayerNormalization", ["u", "s", "z"], ["v"], [.floatValue("epsilon", 1e-5), .int("axis", -1)])
+    b.output("y", DataType.float16, [1, 3, 3, 2])
+    b.output("v", DataType.float16, [1, 4, 2])
+    var g = b.graph
+    #expect(try Patches.prescaleVisionLayerNorm(&g, none, fold: true) == 2)
+
+    let conv = try #require(g.nodes.first { $0.op == "Conv" })
+    #expect(conv.inputs[1].hasSuffix("__vision_div_32") && conv.inputs[2].hasSuffix("__vision_div_32"))
+    func values(_ name: String) throws -> [Float] {
+      let t = try #require(g.initializers.first { $0.key == name })
+      return try Elements.floats(Elements.littleEndian(t, none), as: t.elementType, for: name)
+    }
+    #expect(try values(conv.inputs[1]) == [2, -0.015625])
+    #expect(try values(conv.inputs[2]) == [1, 0.03125])
+    let norms = g.nodes.filter { $0.op == "LayerNormalization" }
+    #expect(norms[0].inputs[0] == "t")
+    #expect(abs(try #require(norms[0].attribute("epsilon")?.f) - 1e-5 / 1024) < 1e-12)
+    #expect(norms[1].inputs[0] == "u__vision_scaled")
+    #expect(g.nodes.filter { $0.op == "Mul" }.count == 1)
+    // the weights the copies replaced are gone
+    #expect(!g.initializers.contains { $0.key == "w" || $0.key == "cb" })
+
+    // and once is enough: neither the fold nor a Mul again
+    #expect(try Patches.prescaleVisionLayerNorm(&g, none, fold: true) == 0)
+    #expect(g.nodes.filter { $0.op == "Mul" }.count == 1)
+    #expect(try values(conv.inputs[1]) == [2, -0.015625])
+  }
+
+  @Test("The sweep tries none and each precision experiment alone, never int8 or the vision-prescale ones")
+  func sweepsThePrecisionExperiments() {
+    let sets = CoreMLPreparation.Experiment.combinations
+    #expect(sets == [[], [.normGuard224], [.normGuardRes224], [.normGuardHot224], [.normGuardHot192], [.normGuardHot240]])
+    #expect(CoreMLPreparation.Experiment.name([.foldVisionPrescale]) == "fold-vision-prescale")
+    #expect(CoreMLPreparation.Experiment.name([.policyNormGuard]) == "policy-norm-guard")
+  }
+
+  @Test("A guarded policy norm reads its prescaled input times peak / max(row peak, peak); a vision norm is left alone")
+  func policyNormsGetARowGuard() throws {
+    var g = Graph()
+    g.inputs = [ValueInfo.tensor("x", DataType.float16, [1, 288, 512]), ValueInfo.tensor("v", DataType.float16, [1, 64])]
+    g.nodes = [
+      Node(inputs: ["x", Patches.policyPrescaleConst], outputs: ["x__scaled"], name: "x__prescale", opType: "Mul"),
+      Node(inputs: ["x__scaled", "w", "b"], outputs: ["y"], name: "ln", opType: "LayerNormalization"),
+      Node(inputs: ["x__scaled", "w", "b"], outputs: ["y2"], name: "ln2", opType: "LayerNormalization"),
+      Node(inputs: ["v", "w", "b"], outputs: ["z"], name: "vision", opType: "LayerNormalization"),
+    ]
+    #expect(Patches.guardPolicyLayerNorm(&g) == 2)
+    let ln = try #require(g.nodes.first { $0.name == "ln" })
+    #expect(ln.inputs[0] == "x__scaled__guard_x")
+    // one guard for the input both norms share
+    #expect(g.nodes.filter { $0.op == "ReduceMax" }.count == 1)
+    #expect(g.nodes.first { $0.name == "ln2" }?.inputs[0] == "x__scaled__guard_x")
+    #expect(g.nodes.first { $0.name == "vision" }?.inputs[0] == "v")
+    // 512 along the axis: a peak of 8, so a row's sum of squares stays under 32768
+    #expect(Patches.layerNormGuardPeak(512) == 8)
+    #expect(Patches.layerNormGuardPeak(64) == (512 as Float).squareRoot())
+    #expect(Patches.layerNormGuardPeak(nil) == 8)
+    let peak = try #require(g.initializers.first { $0.key == "x__scaled__guard_peak" })
+    #expect(peak.dataType == DataType.float16)
+  }
+
+  @Test("The residual selection guards a norm reading an Add 512 wide, not a query norm from a Split; a named one only its names")
+  func guardSelections() throws {
+    func graph() -> Graph {
+      var g = Graph()
+      g.inputs = [ValueInfo.tensor("a", DataType.float16, [1, 288, 512]), ValueInfo.tensor("b", DataType.float16, [1, 288, 512])]
+      g.valueInfo = [ValueInfo.tensor("r", DataType.float16, [1, 288, 512]), ValueInfo.tensor("q", DataType.float16, [1, 8, 288, 64])]
+      g.nodes = [
+        Node(inputs: ["a", "b"], outputs: ["r"], name: "add", opType: "Add"),
+        Node(inputs: ["a"], outputs: ["q"], name: "split", opType: "Split"),
+        Node(inputs: ["r", Patches.policyPrescaleConst], outputs: ["r__scaled"], name: "r__prescale", opType: "Mul"),
+        Node(inputs: ["q", Patches.policyPrescaleConst], outputs: ["q__scaled"], name: "q__prescale", opType: "Mul"),
+        Node(inputs: ["r__scaled", "w", "b"], outputs: ["y"], name: "node_layer_norm_67", opType: "LayerNormalization"),
+        Node(inputs: ["q__scaled", "w", "b"], outputs: ["z"], name: "node_layer_norm_77", opType: "LayerNormalization"),
+      ]
+      return g
+    }
+    var g = graph()
+    #expect(Patches.guardPolicyLayerNorm(&g, fixedPeak: 224, only: .residual) == 1)
+    #expect(g.nodes.first { $0.name == "node_layer_norm_67" }?.inputs[0] == "r__scaled__guard_x")
+    #expect(g.nodes.first { $0.name == "node_layer_norm_77" }?.inputs[0] == "q__scaled")
+    var h = graph()
+    #expect(Patches.guardPolicyLayerNorm(&h, fixedPeak: 224, only: .named(["node_layer_norm_77"])) == 1)
+    #expect(h.nodes.first { $0.name == "node_layer_norm_77" }?.inputs[0] == "q__scaled__guard_x")
+    #expect(Patches.n16HotNorms.count == 18 && Patches.n16HotNorms.contains("node_layer_norm_101"))
+  }
+
+  @Test("Folded, the guard replaces the 1/8 of the policy's prescale Mul with peak / max(row peak, 8 peak)")
+  func guardFoldsIntoThePrescale() throws {
+    var g = Graph()
+    g.inputs = [ValueInfo.tensor("x", DataType.float16, [1, 288, 512])]
+    g.nodes = [
+      Node(inputs: ["x", Patches.policyPrescaleConst], outputs: ["x__scaled"], name: "x__prescale", opType: "Mul"),
+      Node(inputs: ["x__scaled", "w", "b"], outputs: ["y"], name: "ln", opType: "LayerNormalization"),
+    ]
+    #expect(Patches.guardPolicyPrescale(&g, peak: 224) == 1)
+    let mul = try #require(g.nodes.first { $0.name == "x__prescale" })
+    #expect(mul.inputs == ["x", "x__scaled__guard_c"])
+    // the norm reads the Mul's output as before
+    #expect(g.nodes.first { $0.name == "ln" }?.inputs[0] == "x__scaled")
+    // and the guard comes before the Mul
+    let order = g.nodes.map(\.name)
+    #expect(try #require(order.firstIndex(of: "x__scaled__guard_c")) < #require(order.firstIndex(of: "x__prescale")))
+    #expect(g.initializers.contains { $0.key == "__layernorm_prescale_guard_floor" })
+  }
 }
 
 @Suite struct SafeLayerNormTests {
@@ -173,5 +294,40 @@ import Testing
     let concat = try #require(g.nodes.first { $0.op == "Concat" })
     #expect(concat.inputs == ["state_feat_q__fp32", "x"] && concat.outputs == ["next_state_feat_q__fp32"])
     #expect(g.nodes.first { $0.outputs == ["outputs"] }?.inputs == ["state_feat_q__fp32"])
+  }
+}
+
+@Suite struct Int8WeightsTests {
+  private let none = Source(bytes: UnsafeRawBufferPointer(start: nil, count: 0))
+
+  @Test func aMatMulsWeightsGoInt8WithAScalePerColumn() throws {
+    var b = OnnxGraphBuilder(opset: 20)
+    b.input("x", DataType.float16, [1, 2])
+    b.fp16("w", [2, 2], [1, -0.5, -2, 0.25])
+    b.node("MatMul", ["x", "w"], ["y"])
+    b.output("y", DataType.float16, [1, 2])
+    var g = b.graph
+    #expect(try Patches.int8Weights(&g, none, minimum: 1) == 1)
+    #expect(g.nodes.map(\.op) == ["DequantizeLinear", "MatMul"])
+    #expect(g.nodes[1].inputs[1] == g.nodes[0].outputs[0])
+    #expect(g.nodes[0].attribute("axis")?.i == 1)
+    #expect(!g.initializers.contains { $0.key == "w" })
+    let q = try #require(g.initializers.first { $0.key == "w__int8" })
+    let bytes = try Elements.littleEndian(q, none).map { Int8(bitPattern: $0) }
+    // columns' largest: 2 and 0.5, so scales 2/127 and 0.5/127
+    #expect(bytes == [64, -127, -127, 64])
+    let scale = try Elements.floats(Elements.littleEndian(try #require(g.initializers.first { $0.key == "w__int8_scale" }), none), as: DataType.float16, for: "s")
+    #expect(abs(scale[0] - 2 / 127) < 1e-4 && abs(scale[1] - 0.5 / 127) < 1e-4)
+  }
+
+  @Test func smallWeightsStay() throws {
+    var b = OnnxGraphBuilder(opset: 20)
+    b.input("x", DataType.float16, [1, 2])
+    b.fp16("w", [2, 2], [1, 2, 3, 4])
+    b.node("MatMul", ["x", "w"], ["y"])
+    b.output("y", DataType.float16, [1, 2])
+    var g = b.graph
+    #expect(try Patches.int8Weights(&g, none) == 0)
+    #expect(g.nodes.map(\.op) == ["MatMul"])
   }
 }
