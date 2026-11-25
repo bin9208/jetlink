@@ -75,7 +75,8 @@ struct AppSnapshotTests {
   /// The snapshot with the clock taken out: history times are when the
   /// stats event arrived.
   static func json(_ snapshot: AppSnapshot) throws -> [String: Any] {
-    var object = try #require(snapshot.snapshot(after: 0, timeout: 0, port: 5599) { stats })
+    var object = try #require(
+      snapshot.snapshot(after: 0, timeout: 0, port: 5599, recent: { stats }, noo: { NooStatus(model: true, active: true, command: 15, distanceM: 320) }))
     if var history = object["history"] as? [[String: Any]] {
       for index in history.indices { history[index]["at"] = 1_759_000_000.0 + Double(index) }
       object["history"] = history
@@ -117,9 +118,11 @@ struct AppSnapshotTests {
   @Test func disconnectingClearsTheLiveNumbers() throws {
     let snapshot = Self.serving()
     snapshot.apply(.link(LinkEvent(state: .disconnected, detail: "the device went away", peer: nil)))
-    let object = try #require(snapshot.snapshot(after: 0, timeout: 0) { Self.stats })
+    let object = try #require(
+      snapshot.snapshot(after: 0, timeout: 0, recent: { Self.stats }, noo: { NooStatus(model: true, active: true) }))
     #expect((object["history"] as? [Any])?.isEmpty == true)
     #expect(object["recent"] is NSNull)
+    #expect(object["noo"] is NSNull)
   }
 
   @Test func aSnapshotWaitsForNews() throws {

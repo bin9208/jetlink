@@ -196,6 +196,12 @@
       }
     }
   ],
+  "noo" : {
+    "active" : true,
+    "command" : 15,
+    "distance_m" : 320,
+    "model" : true
+  },
   "port" : 5599,
   "recent" : {
     "fps" : 19.899999999999999,

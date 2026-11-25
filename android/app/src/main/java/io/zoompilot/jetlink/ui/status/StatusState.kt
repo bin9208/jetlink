@@ -5,6 +5,7 @@ import io.zoompilot.jetlink.server.Engine
 import io.zoompilot.jetlink.server.HistorySample
 import io.zoompilot.jetlink.server.Medium
 import io.zoompilot.jetlink.server.ModelRow
+import io.zoompilot.jetlink.server.Noo
 import io.zoompilot.jetlink.server.RunState
 import io.zoompilot.jetlink.server.Snapshot
 import io.zoompilot.jetlink.server.Stats
@@ -31,6 +32,9 @@ data class StatusState(
 
     /** The last ten seconds of frames. */
     val recent: Stats? get() = snapshot.recent
+
+    /** NOO while a comma is connected and frames have come. */
+    val noo: Noo? get() = if (connected) snapshot.noo else null
     val history: List<HistorySample> get() = snapshot.history
 
     /** What the connected comma's link is carried over; the server sends it only while one is. */

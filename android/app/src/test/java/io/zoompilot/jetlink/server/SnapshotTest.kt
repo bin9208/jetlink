@@ -40,6 +40,14 @@ class SnapshotTest {
     }
 
     @Test
+    fun theNooState() {
+        val noo = snapshot.noo!!
+        assertTrue(noo.model && noo.active)
+        assertEquals(15, noo.command)
+        assertEquals(320.0, noo.distanceM!!, 1e-9)
+    }
+
+    @Test
     fun theModelRows() {
         assertEquals(2, snapshot.models.size)
         val loaded = snapshot.row(snapshot.engine.sha256)!!
@@ -76,6 +84,7 @@ class SnapshotTest {
         assertFalse(empty.running)
         assertFalse(empty.connected)
         assertNull(empty.recent)
+        assertNull(empty.noo)
         assertTrue(empty.models.isEmpty())
         assertEquals("none", empty.engine.state)
         assertNull(empty.engine.accelerator)

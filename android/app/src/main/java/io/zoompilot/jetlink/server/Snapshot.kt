@@ -24,6 +24,8 @@ data class Snapshot(
     val engine: Engine = Engine(),
     /** The last ten seconds of frames, while a comma is connected. */
     val recent: Stats? = null,
+    /** Whether the connected comma drives on NOO; null before its first frame. */
+    val noo: Noo? = null,
     /** One summary a second, for the history chart. */
     val history: List<HistorySample> = emptyList(),
     val models: List<ModelRow> = emptyList(),
@@ -104,6 +106,23 @@ data class Stats(
     val stagesMs: Stages? = null,
     val slow: Int = 0,
     val windowS: Double = 0.0,
+)
+
+/**
+ * NOO (carrot's Navigate On Openpilot) as the comma's frames show it
+ * (JetlinkKit's NooStatus): a navigation graph such as N16 is loaded, and its
+ * navigation input carries a maneuver ahead. Without a route the comma sends
+ * that input as zeros, and turns are left to carrot's ATC.
+ */
+@Serializable
+data class Noo(
+    /** The loaded graph takes navigation inputs. */
+    val model: Boolean = false,
+    /** A frame in the last 3 s carried a maneuver. */
+    val active: Boolean = false,
+    /** That maneuver as a Valhalla command, and how far ahead. */
+    val command: Int? = null,
+    val distanceM: Double? = null,
 )
 
 @Serializable

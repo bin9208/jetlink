@@ -263,6 +263,11 @@ public final class Server: @unchecked Sendable {
     host.frameStats.summary(window: window, framesTotal: framesServed)
   }
 
+  /// Whether the connected comma drives on NOO; nil before a frame.
+  public func nooStatus() -> NooStatus? {
+    host.noo.status(now: ProcessInfo.processInfo.systemUptime)
+  }
+
   /// Stops listening, dialing and serving. The engine stays loaded, for a
   /// server that will be started again; `shutdown()` releases it.
   public func stop() {

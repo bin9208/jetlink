@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.Report
 import androidx.compose.material.icons.filled.SlowMotionVideo
 import androidx.compose.material.icons.filled.Speed
@@ -44,6 +46,7 @@ import io.zoompilot.jetlink.server.Stats
 import io.zoompilot.jetlink.ui.Format
 import io.zoompilot.jetlink.ui.JetlinkTheme
 import io.zoompilot.jetlink.ui.Thermal
+import io.zoompilot.jetlink.ui.Tone
 import io.zoompilot.jetlink.ui.components.CardSpacing
 import io.zoompilot.jetlink.ui.components.HistoryChart
 import io.zoompilot.jetlink.ui.components.LatencyBreakdown
@@ -141,6 +144,7 @@ private fun Cards(state: StatusState, layout: CardLayout, actions: StatusActions
                 if (serving != null) {
                     LatencyCard(serving, compact = true)
                     LinkTiles(serving)
+                    MetricRow { NooTile(state) }
                 } else {
                     DeviceTiles(state)
                 }
@@ -231,7 +235,21 @@ private fun DeviceTiles(state: StatusState) {
                 noteColor = if (state.medium?.slow == true) colors.warning else null,
             )
         }
+        MetricRow { NooTile(state) }
     }
+}
+
+/** Whether the turns ahead come to the model from the route (NOO) or are left to ATC. */
+@Composable
+private fun RowScope.NooTile(state: StatusState) {
+    val colors = JetlinkTheme.colors
+    val text = NooText.tile(state.noo, state.connected)
+    MetricTile(
+        "NOO", Icons.Filled.Navigation, if (text.tone == Tone.Neutral) colors.secondaryText else colors.tone(text.tone),
+        text.value, tile(),
+        note = text.note,
+        noteColor = colors.tone(text.tone),
+    )
 }
 
 private fun batteryIcon(health: DeviceHealth): ImageVector {
