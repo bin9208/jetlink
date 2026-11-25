@@ -97,9 +97,9 @@
   @_cdecl("Java_io_zoompilot_jetlink_server_Native_snapshot")
   public func nativeSnapshot(_ env: Env, _ cls: jclass?, _ after: jlong, _ timeoutMs: jint) -> jstring? {
     let server = Host.shared.running?.server
-    let snapshot = Host.shared.state.snapshot(after: Int(after), timeout: Double(timeoutMs) / 1000, port: server?.port.map { Int($0) }) {
-      server?.recentStats(window: AppSnapshot.recentWindow)
-    }
+    let snapshot = Host.shared.state.snapshot(
+      after: Int(after), timeout: Double(timeoutMs) / 1000, port: server?.port.map { Int($0) },
+      recent: { server?.recentStats(window: AppSnapshot.recentWindow) }, noo: { server?.nooStatus() })
     return jstring(env, snapshot.map(json) ?? "")
   }
 

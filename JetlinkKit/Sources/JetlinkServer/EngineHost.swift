@@ -148,6 +148,8 @@ public final class EngineHost: @unchecked Sendable {
   /// Frames from the comma's drives, for the benchmark's CPU comparison.
   /// Under `lock`.
   let roadFrames: RoadFrames
+  /// The frames' NOO maneuver, for the app's badge. Its own lock.
+  let noo = NooWatch()
 
   var roadFramesDirectory: URL { cache.layout.root.appending(path: "road-frames", directoryHint: .isDirectory) }
 

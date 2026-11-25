@@ -103,8 +103,11 @@ public final class AppSnapshot: @unchecked Sendable {
   /// Waits until the state is newer than `after`, or `timeout` passes, and
   /// returns it whole; nil when there is nothing new, except while a comma is
   /// connected, whose live numbers move every second. `port` is where the
-  /// server listens; `recent` the frames of the last `recentWindow` seconds.
-  public func snapshot(after: Int, timeout: TimeInterval, port: Int? = nil, recent: () -> StatsEvent? = { nil }) -> [String: Any]? {
+  /// server listens; `recent` the frames of the last `recentWindow` seconds;
+  /// `noo` whether those frames drive on NOO.
+  public func snapshot(
+    after: Int, timeout: TimeInterval, port: Int? = nil, recent: () -> StatsEvent? = { nil }, noo: () -> NooStatus? = { nil }
+  ) -> [String: Any]? {
     condition.lock()
     defer { condition.unlock() }
     let deadline = Date().addingTimeInterval(max(0, timeout))
@@ -127,6 +130,7 @@ public final class AppSnapshot: @unchecked Sendable {
         .map { AppSnapshot.row($0, inventory: inventory) }
     }
     let recentStats = link.state == .connected ? recent() : nil
+    let nooStatus = link.state == .connected ? noo() : nil
     // with the report as the other apps share it
     var benchmark: Any = NSNull()
     if let event = state.benchmark {
@@ -144,6 +148,7 @@ public final class AppSnapshot: @unchecked Sendable {
       "medium": link.connectedMedium.map { ["name": $0.rawValue, "title": $0.title, "slow": $0.isSlow] as [String: Any] } ?? NSNull(),
       "engine": ControlEvent.object(state.engine),
       "recent": recentStats.map { ControlEvent.object($0) } ?? NSNull(),
+      "noo": nooStatus.map { ControlEvent.object($0) } ?? NSNull(),
       "history": state.statsHistory.map { ["at": $0.at.timeIntervalSince1970, "stats": encodedStats[$0.at] ?? NSNull()] as [String: Any] },
       "models": rows ?? [],
       "catalog": catalog.map { catalog -> Any in

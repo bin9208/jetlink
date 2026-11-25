@@ -108,6 +108,7 @@ final class Session: @unchecked Sendable {
     }
     // the drive's last frames, for the next benchmark's comparison
     host.roadFrames.save()
+    host.noo.reset()
     host.lock.unlock()
     transport.close()
   }
@@ -578,6 +579,7 @@ final class Session: @unchecked Sendable {
       host.roadFrames.offer(
         sha256: loaded.sha256, warped: warped, warpedBytes: layout.warpedBytes, packed: warped + layout.warpedBytes,
         packedBytes: loaded.spec.packedBytes)
+      host.noo.offer(sha256: loaded.sha256, spec: loaded.spec, packed: warped + layout.warpedBytes, now: host.lastSeenAt)
     } catch {
       log.error("inference failed: \(String(describing: error))")
       status = .inferFailed
