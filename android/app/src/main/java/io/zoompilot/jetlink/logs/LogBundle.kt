@@ -1,5 +1,7 @@
 package io.zoompilot.jetlink.logs
 
+import android.app.ActivityManager
+import android.app.ApplicationExitInfo
 import android.content.Context
 import android.os.Build
 import android.os.Process
@@ -45,15 +47,76 @@ object LogBundle {
         text
     }.getOrElse { "(logcat unavailable: ${it.message})\n" }
 
+    /** How many of the app's last exits the bundle lists. */
+    private const val EXITS = 5
+
+    /** At most this many of Jetlink's lines from processes before this one. */
+    private const val EARLIER_LINES = 400
+
     /**
-     * The bundle as a file in the app's cache: header, Jetlink's log, then
-     * the process log, its oldest lines cut first to stay under [MAX_BYTES].
+     * Why the app's last processes ended, newest first: Android keeps this
+     * after the process is gone, so a build the phone killed for memory
+     * (LOW_MEMORY) or a crash in QNN's native code (CRASH_NATIVE) shows in
+     * the next bundle.
+     */
+    fun exits(context: Context): String = runCatching {
+        val am = context.getSystemService(ActivityManager::class.java)
+        val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+        am.getHistoricalProcessExitReasons(context.packageName, 0, EXITS).joinToString("") { e ->
+            "${stamp.format(Date(e.timestamp))} pid ${e.pid} ${reason(e.reason)} status ${e.status}" +
+                " importance ${e.importance} pss ${e.pss / 1024} MB rss ${e.rss / 1024} MB" +
+                (e.description?.let { ": $it" } ?: "") + "\n"
+        }.ifEmpty { "(none recorded)\n" }
+    }.getOrElse { "(unavailable: ${it.message})\n" }
+
+    private fun reason(r: Int): String = when (r) {
+        ApplicationExitInfo.REASON_ANR -> "ANR"
+        ApplicationExitInfo.REASON_CRASH -> "CRASH"
+        ApplicationExitInfo.REASON_CRASH_NATIVE -> "CRASH_NATIVE"
+        ApplicationExitInfo.REASON_DEPENDENCY_DIED -> "DEPENDENCY_DIED"
+        ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "EXCESSIVE_RESOURCE_USAGE"
+        ApplicationExitInfo.REASON_EXIT_SELF -> "EXIT_SELF"
+        ApplicationExitInfo.REASON_INITIALIZATION_FAILURE -> "INITIALIZATION_FAILURE"
+        ApplicationExitInfo.REASON_LOW_MEMORY -> "LOW_MEMORY"
+        ApplicationExitInfo.REASON_OTHER -> "OTHER"
+        ApplicationExitInfo.REASON_PACKAGE_STATE_CHANGE -> "PACKAGE_STATE_CHANGE"
+        ApplicationExitInfo.REASON_PACKAGE_UPDATED -> "PACKAGE_UPDATED"
+        ApplicationExitInfo.REASON_PERMISSION_CHANGE -> "PERMISSION_CHANGE"
+        ApplicationExitInfo.REASON_SIGNALED -> "SIGNALED"
+        ApplicationExitInfo.REASON_USER_REQUESTED -> "USER_REQUESTED"
+        ApplicationExitInfo.REASON_USER_STOPPED -> "USER_STOPPED"
+        else -> "reason $r"
+    }
+
+    /**
+     * Jetlink's lines and any native crash report from the app's earlier
+     * processes, which Android's log still holds: an app reads its own
+     * lines of any of its processes. A build that died mid-compile left its
+     * last memory lines there.
+     */
+    fun earlierLogcat(): String = runCatching {
+        val command = arrayOf("logcat", "-d", "-v", "threadtime", "-s", "jetlink:*", "DEBUG:*", "libc:F")
+        val process = ProcessBuilder(*command).redirectErrorStream(true).start()
+        val text = process.inputStream.bufferedReader().use { it.readLines() }
+        process.waitFor()
+        val mine = Process.myPid().toString()
+        // threadtime: date time pid tid level tag: message
+        text.filter { line -> line.split(Regex("\\s+")).getOrNull(2).let { it != null && it != mine && it.all(Char::isDigit) } }
+            .takeLast(EARLIER_LINES).joinToString("\n", postfix = "\n").ifBlank { "(none in the log)\n" }
+    }.getOrElse { "(logcat unavailable: ${it.message})\n" }
+
+    /**
+     * The bundle as a file in the app's cache: header, Jetlink's log, the
+     * app's last exits and earlier processes' lines, then the process log,
+     * its oldest lines cut first to stay under [MAX_BYTES].
      */
     fun write(context: Context, lines: List<String>, processor: Processor): File {
         val head = header(processor)
         val jetlink = lines.joinToString("\n", postfix = "\n")
+        val exits = exits(context)
+        val earlier = earlierLogcat()
         var android = logcat()
-        val room = MAX_BYTES - head.length - jetlink.length - 256
+        val room = MAX_BYTES - head.length - jetlink.length - exits.length - earlier.length - 512
         if (android.length > room) {
             android = "(older lines cut)\n" + android.takeLast(maxOf(room, 0))
         }
@@ -62,6 +125,12 @@ object LogBundle {
             appendLine()
             appendLine("== Jetlink log (${lines.size} lines)")
             append(jetlink)
+            appendLine()
+            appendLine("== Last exits of the app, newest first")
+            append(exits)
+            appendLine()
+            appendLine("== Jetlink lines of earlier processes")
+            append(earlier)
             appendLine()
             appendLine("== Android log of this process")
             append(android)

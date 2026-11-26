@@ -264,7 +264,16 @@ struct Tensor {
   /// as the schema declares, however the source wrote them.
   var typed: [Int: [Range<Int>]] = [:]
   var isExternal = false
+  /// Where the preparation moved this tensor's raw_data: a file beside the
+  /// model, as onnx's external data (written as fields 13 and 14).
+  var movedTo: ExternalData?
   var extras: [RawField] = []
+
+  struct ExternalData {
+    var location: String
+    var offset: Int
+    var length: Int
+  }
 
   var key: String { name ?? "" }
   var elementType: Int32 { dataType ?? 0 }
@@ -805,7 +814,11 @@ enum Encode {
 
   static func tensor(_ t: Tensor, _ src: Source) -> Encoded {
     var out = Encoded()
-    var extras = FieldCursor(t.extras, known: tensorFields)
+    // A moved tensor's own data_location (exporters write DEFAULT out, e.g.
+    // BMRLNAP v3's) would come after EXTERNAL and win; it and any
+    // external_data go.
+    let kept = t.movedTo == nil ? t.extras : t.extras.filter { $0.number != 13 && $0.number != 14 }
+    var extras = FieldCursor(kept, known: tensorFields)
     for d in t.dims { out.intField(1, d) }
     if let v = t.dataType { out.intField(2, Int64(v)) }
     extras.upTo(4, &out, src)
@@ -826,8 +839,30 @@ enum Encode {
     }
     packed(10, t, &out, src)
     packed(11, t, &out, src)
+    if let moved = t.movedTo {
+      extras.upTo(13, &out, src)
+      // external_data: StringStringEntryProto entries, as onnx's
+      // set_external_data writes them; then data_location EXTERNAL.
+      for (key, value) in [("location", moved.location), ("offset", String(moved.offset)), ("length", String(moved.length))] {
+        var entry = Encoded()
+        entry.stringField(1, key)
+        entry.stringField(2, value)
+        out.message(13, entry)
+      }
+      out.intField(14, 1)
+    }
     extras.rest(&out, src)
     return out
+  }
+
+  /// A tensor's raw_data bytes alone, as they would follow its length prefix.
+  static func data(_ data: Tensor.Data, _ out: inout Encoded, _ src: Source) {
+    switch data {
+    case .source(let r): out.source(r, src)
+    case .owned(let b): out.bytes(b)
+    case .transposed(let tr): out.transposed(tr)
+    case .widened(let w): out.widened(w)
+    }
   }
 
   private static func packed(_ number: Int, _ t: Tensor, _ out: inout Encoded, _ src: Source) {

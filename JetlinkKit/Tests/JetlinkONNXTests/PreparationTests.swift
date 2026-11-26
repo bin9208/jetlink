@@ -224,10 +224,160 @@ import Testing
       (ProcessInfo.processInfo.environment["JETLINK_PREPARE_EXPERIMENTS"] ?? "").split(separator: ",").compactMap {
         CoreMLPreparation.Experiment(rawValue: String($0))
       })
+    // JETLINK_PREPARE_EXTERNAL_FROM=0 moves any model's weights out; a huge
+    // value keeps a large one's inside, as before carrot.57
+    let externalFrom = ProcessInfo.processInfo.environment["JETLINK_PREPARE_EXTERNAL_FROM"].flatMap { Int64($0) }
+      ?? CoreMLPreparation.externalWeightsFrom
     let start = Date()
     let report = try CoreMLPreparation.prepare(
       source: URL(fileURLWithPath: spec[1]), into: URL(fileURLWithPath: spec[2]), layout: layout, cacheKey: { "jetlink\($0)" },
-      experiments: experiments)
+      experiments: experiments, externalWeightsFrom: externalFrom)
     print("prepared in \(Date().timeIntervalSince(start)) s: \(report)")
+  }
+
+  /// The Hexagon NPU's layout with the weights in a file of their own: the
+  /// same model with each initializer of 1 KB or more moved to
+  /// model.onnx.data at an aligned offset, byte for byte. Below the
+  /// threshold, and in any other layout, one file as before.
+  @Test func largeWeightsGoBesideTheModel() throws {
+    let inline = try TemporaryDirectory()
+    let external = try TemporaryDirectory()
+    let source = Fixtures.url("stateful.onnx")
+    let kept = try CoreMLPreparation.prepare(
+      source: source, into: inline.url, layout: .hexagonWhole, cacheKey: { $0 })
+    let moved = try CoreMLPreparation.prepare(
+      source: source, into: external.url, layout: .hexagonWhole, cacheKey: { $0 }, externalWeightsFrom: 0)
+    #expect(kept.parts[0].dataURL == nil)
+    #expect(!FileManager.default.fileExists(atPath: inline.url.appending(path: "model.onnx.data").path))
+    let dataURL = try #require(moved.parts[0].dataURL)
+    #expect(dataURL.lastPathComponent == "model.onnx.data")
+    #expect(moved.parts[0].weightBytes == kept.parts[0].weightBytes)
+
+    // Every tensor the inline model holds 1 KB or more of is in the data file
+    // where the moved model's external_data says, and nothing else changed.
+    let inlineModel = try Data(contentsOf: kept.parts[0].url)
+    let movedModel = try Data(contentsOf: moved.parts[0].url)
+    let data = try Data(contentsOf: dataURL)
+    let inlineTensors = try Self.initializers(inlineModel)
+    let movedTensors = try Self.initializers(movedModel)
+    #expect(inlineTensors.map(\.name) == movedTensors.map(\.name))
+    var movedCount = 0
+    for (a, b) in zip(inlineTensors, movedTensors) {
+      if let entries = b.external {
+        movedCount += 1
+        #expect(b.raw == nil)
+        #expect(entries["location"] == "model.onnx.data")
+        let offset = try #require(entries["offset"].flatMap { Int($0) })
+        let length = try #require(entries["length"].flatMap { Int($0) })
+        #expect(offset % CoreMLPreparation.externalAlignment == 0)
+        #expect(length == a.raw?.count)
+        #expect(data[offset..<(offset + length)] == a.raw)
+        #expect(b.dataLocation == 1)
+      } else {
+        #expect(b.raw == a.raw)
+        #expect((a.raw?.count ?? 0) < CoreMLPreparation.externalTensorFrom)
+      }
+      #expect(a.header == b.header)
+    }
+    #expect(movedCount > 0)
+    #expect(movedModel.count < inlineModel.count)
+
+    // Other layouts never move them.
+    let whole = try TemporaryDirectory()
+    let wholeReport = try CoreMLPreparation.prepare(
+      source: source, into: whole.url, layout: .aneWhole, cacheKey: { $0 }, externalWeightsFrom: 0)
+    #expect(wholeReport.parts[0].dataURL == nil)
+  }
+
+  /// A source tensor that writes data_location DEFAULT out (BMRLNAP v3's do)
+  /// is still EXTERNAL once moved: its own field goes, it does not follow and win.
+  @Test func movedTensorDropsItsOwnDataLocation() throws {
+    // data_location (14) = DEFAULT, as the exporter wrote it
+    let sourceBytes: [UInt8] = [0x70, 0x00]
+    try sourceBytes.withUnsafeBytes { buf in
+      let src = Source(bytes: buf)
+      var t = Tensor(name: "w", dims: [4], dataType: 1, raw: .owned([UInt8](repeating: 7, count: 16)))
+      t.extras = [RawField(number: 14, range: 0..<2)]
+      let kept = try Self.fields(Data(flatten(Encode.tensor(t, src), src)))
+      #expect(kept.filter { $0.0 == 14 }.map { [UInt8]($0.1) } == [[0]])
+
+      t.raw = nil
+      t.movedTo = Tensor.ExternalData(location: "model.onnx.data", offset: 16384, length: 16)
+      let moved = try Self.fields(Data(flatten(Encode.tensor(t, src), src)))
+      #expect(moved.filter { $0.0 == 14 }.map { [UInt8]($0.1) } == [[1]])
+      #expect(moved.filter { $0.0 == 13 }.count == 3)
+      #expect(!moved.contains { $0.0 == 9 })
+    }
+  }
+
+  struct TensorFields {
+    var name = ""
+    var raw: Data?
+    var external: [String: String]?
+    var dataLocation: UInt64?
+    /// dims and data type, as written
+    var header = Data()
+  }
+
+  /// A prepared model's initializers, read field by field.
+  static func initializers(_ model: Data) throws -> [TensorFields] {
+    var out: [TensorFields] = []
+    for (number, payload) in try fields(model) where number == 7 {
+      for (gn, tensor) in try fields(payload) where gn == 5 {
+        var t = TensorFields()
+        for (tn, value) in try fields(tensor) {
+          switch tn {
+          case 1, 2: t.header.append(value)
+          case 8: t.name = String(decoding: value, as: UTF8.self)
+          case 9: t.raw = value
+          case 13:
+            let kv = Dictionary(uniqueKeysWithValues: try fields(value).map { ($0.0, String(decoding: $0.1, as: UTF8.self)) })
+            t.external = (t.external ?? [:]).merging([kv[1] ?? "": kv[2] ?? ""]) { $1 }
+          case 14: t.dataLocation = value.first.map { UInt64($0) }
+          default: break
+          }
+        }
+        out.append(t)
+      }
+    }
+    return out
+  }
+
+  /// A message's fields: (number, payload) for length-delimited ones, (number,
+  /// the varint's bytes) for varints.
+  static func fields(_ d: Data) throws -> [(Int, Data)] {
+    let b = [UInt8](d)
+    var i = 0
+    var out: [(Int, Data)] = []
+    func varint() throws -> UInt64 {
+      var v: UInt64 = 0
+      var shift: UInt64 = 0
+      while true {
+        guard i < b.count else { throw OnnxError("truncated varint") }
+        let c = b[i]
+        i += 1
+        v |= UInt64(c & 0x7f) << shift
+        if c < 0x80 { return v }
+        shift += 7
+      }
+    }
+    while i < b.count {
+      let key = try varint()
+      let number = Int(key >> 3)
+      switch key & 7 {
+      case 0:
+        let start = i
+        _ = try varint()
+        out.append((number, Data(b[start..<i])))
+      case 2:
+        let n = Int(try varint())
+        out.append((number, Data(b[i..<(i + n)])))
+        i += n
+      case 1: i += 8
+      case 5: i += 4
+      default: throw OnnxError("wire type \(key & 7)")
+      }
+    }
+    return out
   }
 }

@@ -274,10 +274,12 @@ public final class OrtBackend: EngineBackend {
     try Artifact.build(artifact, metaExtra: metaExtra, report: report) { staged in
       try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: true)
       report("patch", 0, profile.usesCoreML ? "preparing the model for CoreML" : "preparing the model")
+      logMemory("before preparing \(model.lastPathComponent)")
       let prepared = try preparer.with(experiments: experiments).prepare(model: model, into: staged, layout: profile.layout) {
         CoreMLPreparation.cacheKey(stem: artifact.deletingPathExtension().lastPathComponent, part: $0)
       }
       log.info("prepared \(model.lastPathComponent): \(prepared.summary)")
+      logMemory("prepared")
       let sessions = profile.sessions
       guard prepared.parts.map(\.name) == sessions.map(\.name) else {
         throw HostError.failed("the preparation wrote \(prepared.parts.map(\.name)), expected \(sessions.map(\.name))")
@@ -311,10 +313,12 @@ public final class OrtBackend: EngineBackend {
           staged, manifest, weightBytes: prepared.parts.reduce(0) { $0 + $1.weightBytes }, expect: expect, model: model, started: started, report: report)
       }
       // Prove it runs before calling it built: minutes on a CPU, so it ticks.
+      logMemory("loading the compiled model to check it runs")
       let providers = try Ticker.during(interval: 1, Ticker.paced("load", "loading the model to check it runs", took: 0, report: report)) {
         let engine = try OrtEngine(plans: plans(staged, manifest), device: deviceTag(), keepAlive: false, keepCPUWarm: false)
         defer { engine.close() }
         try engine.run()
+        logMemory("the compiled model ran")
         return engine.providers
       }
       var meta = OrtArtifact.meta(self, manifest: manifest, providers: providers, model: model, started: started)
@@ -331,7 +335,17 @@ public final class OrtBackend: EngineBackend {
     let source = staged.appending(path: file)
     let context = staged.appending(path: "\(session)_ctx.onnx")
     report("compile", 0, "compiling \(session) for the NPU")
-    try Ticker.during(interval: 2, Ticker.paced("compile", "compiling \(session) for the NPU", took: took, report: report)) {
+    logMemory("compiling \(session) for the NPU")
+    let paced = Ticker.paced("compile", "compiling \(session) for the NPU", took: took, report: report)
+    let log = log
+    let tick: @Sendable (TimeInterval) -> Void = { elapsed in
+      paced(elapsed)
+      // the ticks are 2 s apart: one line each time another 10 s have gone by
+      if Int(elapsed) / 10 != Int(elapsed - 2) / 10, let memory = MemoryStatus.describe() {
+        log.info("compiling \(session), \(Int(elapsed)) s: memory \(memory)")
+      }
+    }
+    try Ticker.during(interval: 2, tick) {
       let config = [
         "ep.context_enable": "1",
         "ep.context_file_path": context.path,
@@ -344,8 +358,19 @@ public final class OrtBackend: EngineBackend {
       log.warning("onnxruntime wrote no EP context for \(session); each load will compile it again")
       return file
     }
+    logMemory("compiled \(session)")
     try? FileManager.default.removeItem(at: source)
+    // the weights the preparation kept beside a large model
+    try? FileManager.default.removeItem(at: staged.appending(path: CoreMLPreparation.externalDataName(session)))
     return context.lastPathComponent
+  }
+
+  /// One line of the build's log with the app's and the phone's memory, where
+  /// /proc has them.
+  private func logMemory(_ when: String) {
+    if let memory = MemoryStatus.describe() {
+      log.info("\(when): memory \(memory)")
+    }
   }
 
   /// A CoreML build's first session creation is the conversion and CoreML's

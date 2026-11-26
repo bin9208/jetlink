@@ -135,6 +135,8 @@ public enum CoreMLPreparation {
     /// `len(t.raw_data)` the same way, so a tensor kept in the typed fields
     /// counts as 0.
     public let weightBytes: Int64
+    /// `<name>.onnx.data` when the weights went there (`externalWeightsFrom`).
+    public var dataURL: URL? = nil
   }
 
   public struct Report: Sendable, Equatable {
@@ -206,12 +208,14 @@ public enum CoreMLPreparation {
     cacheKey: (String) -> String,
     progress: ((Double) -> Void)? = nil,
     probes: ProbeRequest? = nil,
-    experiments: Set<Experiment> = []
+    experiments: Set<Experiment> = [],
+    externalWeightsFrom: Int64 = CoreMLPreparation.externalWeightsFrom
   ) throws -> Report {
     let data = try Data(contentsOf: source, options: .alwaysMapped)
     return try data.withUnsafeBytes { buf in
       try prepare(
-        Source(bytes: buf), into: directory, layout: layout, cacheKey: cacheKey, progress: progress, probes: probes, experiments: experiments)
+        Source(bytes: buf), into: directory, layout: layout, cacheKey: cacheKey, progress: progress, probes: probes, experiments: experiments,
+        externalWeightsFrom: externalWeightsFrom)
     }
   }
 
@@ -220,7 +224,8 @@ public enum CoreMLPreparation {
     cacheKey: (String) -> String,
     progress: ((Double) -> Void)?,
     probes probeRequest: ProbeRequest? = nil,
-    experiments: Set<Experiment> = []
+    experiments: Set<Experiment> = [],
+    externalWeightsFrom: Int64
   ) throws -> Report {
     var (model, g) = try Decode.preparable(src)
 
@@ -314,7 +319,15 @@ public enum CoreMLPreparation {
       parts[i].model.props.removeAll { $0.key == cacheKeyProp || $0.key == "CACHE_KEY" }
       parts[i].model.props.append(Prop(raw: nil, key: cacheKeyProp, value: cacheKey(parts[i].name)))
     }
-    let reported = try write(parts, src, into: directory, progress: progress)
+    // The Hexagon NPU's compile is onnxruntime and QNN in the app's own
+    // process. With a 1.76 GB model's weights inside model.onnx, onnxruntime
+    // held all of them on the heap (1715 MB measured with 1.29.0) beside QNN's
+    // copy and the compiled context, and 12 GB phones died compiling it
+    // (Fold 7 and Tab S9 Ultra, BMRLNAP v3). In a file of their own,
+    // onnxruntime maps them instead (40 MB on the heap). The graph and the
+    // weights stay byte for byte the same; smaller models keep one file.
+    let external = layout == .hexagonWhole ? externalWeightsFrom : nil
+    let reported = try write(parts, src, into: directory, externalFrom: external, progress: progress)
     var report = Report(
       stripped: stripped, retypedImages: retyped, gathers: gathers, gemms: gemms, tiles: tiles,
       norms: norms, heads: heads, masks: masks, parts: reported)
@@ -329,18 +342,54 @@ public enum CoreMLPreparation {
     return report
   }
 
-  /// Encodes each part and streams it to `<name>.onnx` in `directory`; on a
-  /// failure, the files already written go.
+  /// A part whose initializers' raw_data add up to this many bytes or more
+  /// keeps them in `<name>.onnx.data` beside it, for the Hexagon NPU's layout.
+  public static let externalWeightsFrom: Int64 = 1 << 30
+
+  /// A tensor's raw_data this short stays inline, as onnx's
+  /// convert_model_to_external_data leaves tensors under its size_threshold.
+  static let externalTensorFrom = 1024
+
+  /// Each tensor's offset in the data file is a multiple of this, a page on
+  /// any phone, so onnxruntime can map it where it lies.
+  static let externalAlignment = 16384
+
+  /// The name of a part's external data file, beside `<name>.onnx`.
+  public static func externalDataName(_ part: String) -> String { "\(part).onnx.data" }
+
+  /// Moves the raw_data of every initializer at least `externalTensorFrom`
+  /// long into one data stream, each at an aligned offset, and points the
+  /// tensors at it. Returns the model left and the stream.
+  static func externalize(_ model: Model, location: String, _ src: Source) -> (model: Model, data: Encoded) {
+    var model = model
+    var data = Encoded()
+    for i in model.graph!.initializers.indices {
+      guard let raw = model.graph!.initializers[i].raw, raw.count >= externalTensorFrom else { continue }
+      let pad = (externalAlignment - data.count % externalAlignment) % externalAlignment
+      data.bytes(repeatElement(UInt8(0), count: pad))
+      let offset = data.count
+      Encode.data(raw, &data, src)
+      model.graph!.initializers[i].raw = nil
+      model.graph!.initializers[i].movedTo = Tensor.ExternalData(location: location, offset: offset, length: raw.count)
+    }
+    return (model, data)
+  }
+
+  /// Encodes each part and streams it to `<name>.onnx` in `directory`, a part
+  /// with `externalFrom` bytes of weights or more with them in
+  /// `<name>.onnx.data`; on a failure, the files already written go.
   private static func write(
-    _ parts: [(name: String, model: Model)], _ src: Source, into directory: URL, progress: ((Double) -> Void)?
+    _ parts: [(name: String, model: Model)], _ src: Source, into directory: URL, externalFrom: Int64? = nil, progress: ((Double) -> Void)?
   ) throws -> [Part] {
     let encoded = parts.map { part in
-      (
-        name: part.name, bytes: Encode.model(part.model, src),
-        weights: part.model.graph!.initializers.reduce(Int64(0)) { $0 + Int64($1.raw?.count ?? 0) }
-      )
+      let weights = part.model.graph!.initializers.reduce(Int64(0)) { $0 + Int64($1.raw?.count ?? 0) }
+      if let externalFrom, weights >= externalFrom {
+        let (model, data) = externalize(part.model, location: externalDataName(part.name), src)
+        return (name: part.name, bytes: Encode.model(model, src), data: Optional(data), weights: weights)
+      }
+      return (name: part.name, bytes: Encode.model(part.model, src), data: nil as Encoded?, weights: weights)
     }
-    let total = max(1, encoded.reduce(0) { $0 + $1.bytes.count })
+    let total = max(1, encoded.reduce(0) { $0 + $1.bytes.count + ($1.data?.count ?? 0) })
 
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     var done = 0
@@ -348,6 +397,17 @@ public enum CoreMLPreparation {
     var reported: [Part] = []
     do {
       for part in encoded {
+        var dataURL: URL?
+        if let data = part.data {
+          let url = directory.appendingPathComponent(externalDataName(part.name))
+          written.append(url)
+          let base = done
+          try PartWriter.write(data, src, to: url) { bytes in
+            progress?(Double(base + bytes) / Double(total))
+          }
+          done += data.count
+          dataURL = url
+        }
         let url = directory.appendingPathComponent("\(part.name).onnx")
         written.append(url)
         let base = done
@@ -355,7 +415,7 @@ public enum CoreMLPreparation {
           progress?(Double(base + bytes) / Double(total))
         }
         done += part.bytes.count
-        reported.append(Part(name: part.name, url: url, weightBytes: part.weights))
+        reported.append(Part(name: part.name, url: url, weightBytes: part.weights, dataURL: dataURL))
       }
     } catch {
       for url in written {

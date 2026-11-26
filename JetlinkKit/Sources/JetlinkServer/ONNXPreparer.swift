@@ -76,6 +76,11 @@ public struct ONNXPreparer: ModelPreparer {
     if layout == .aneWhole || layout == .hexagonWhole {
       summary += "; for the whole Neural Engine: \(report.norms) policy LayerNormalization(s) prescaled, \(report.visionNorms) vision LayerNormalization(s) prescaled with their epsilon, \(report.stateIO) state queue(s) fp16 at the edge, \(report.int8Weights) weight(s) int8, \(report.guardedNorms) policy norm(s) row-guarded, \(report.safeNorms) norm(s) in fp16-safe form, \(report.heads) vision head node(s) in fp32, \(report.biasMasks) constant Softmax mask(s) as an fp16 bias, \(report.masks) Softmax mask fill(s) made finite"
     }
+    for part in report.parts {
+      if let data = part.dataURL {
+        summary += "; \(part.name)'s weights in \(data.lastPathComponent) for onnxruntime to map"
+      }
+    }
     return PreparedModel(
       parts: report.parts.map { PreparedModel.Part(name: $0.name, file: $0.url.lastPathComponent, weightBytes: $0.weightBytes) },
       summary: summary)
