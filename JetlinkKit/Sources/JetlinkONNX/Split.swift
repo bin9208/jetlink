@@ -42,6 +42,97 @@ enum Split {
     return (vision, policy)
   }
 
+  /// The model in `count` chunks run one after the other, cut inside the
+  /// vision trunk where a single tensor alone crosses (a block's output),
+  /// each cut where the weights read so far come nearest an equal share.
+  /// Chunk i reads the cut before it and the graph inputs its nodes read,
+  /// and gives the cut after it and any graph output it makes; the last
+  /// holds the rest of the trunk and the policy. Fewer chunks when the trunk
+  /// has fewer such places; one when it has none.
+  ///
+  /// For the Hexagon NPU: QNN compiles a 1.76 GB model in one piece with
+  /// more memory than a 12 GB phone has free, and a chunk at a time with a
+  /// share of it. The nodes, their order and the weights are the model's.
+  static func chunks(_ model: Model, count: Int) throws -> [Model] {
+    guard count > 1, let g = model.graph else { return [model] }
+    let cuts = chunkCuts(g, count: count)
+    guard !cuts.isEmpty else { return [model] }
+    let extractor = try Extractor(model)
+    let graphInputs = g.inputs.map(\.key)
+    let graphOutputs = g.outputs.map(\.key)
+    var producedAt: [String: Int] = [:]
+    for (k, node) in g.nodes.enumerated() {
+      for name in node.outputs where !name.isEmpty { producedAt[name] = k }
+    }
+    var models: [Model] = []
+    var start = 0
+    var previous: String?
+    for (end, tensor) in cuts.map({ ($0.index, $0.tensor) }) + [(g.nodes.count - 1, nil as String?)] {
+      let nodes = g.nodes[start...end]
+      var read = Set<String>()
+      for node in nodes { read.formUnion(node.inputs) }
+      let inputs = (previous.map { [$0] } ?? []) + graphInputs.filter(read.contains)
+      let made = graphOutputs.filter { producedAt[$0].map { (start...end).contains($0) } ?? false }
+      let outputs = (tensor.map { [$0] } ?? []) + made
+      models.append(try extractor.extract(inputs: inputs, outputs: outputs))
+      previous = tensor
+      start = end + 1
+    }
+    return models
+  }
+
+  /// Where `chunks` cuts: (the node after which, the one tensor crossing),
+  /// in order.
+  static func chunkCuts(_ g: Graph, count: Int) -> [(index: Int, tensor: String)] {
+    guard let mask = try? visionMask(g) else { return [] }
+    var weightOf: [String: Int] = [:]
+    for t in g.initializers { weightOf[t.key] = t.raw?.count ?? 0 }
+    var lastUse: [String: Int] = [:]
+    for (k, node) in g.nodes.enumerated() {
+      for name in node.inputs where !name.isEmpty { lastUse[name] = k }
+    }
+    let outputs = Set(g.outputs.map(\.key))
+    for name in outputs { lastUse[name] = g.nodes.count }
+    let shaped = Set(
+      (g.inputs + g.valueInfo + g.outputs).filter { vi in
+        guard let dims = vi.shape?.dims else { return false }
+        return dims.allSatisfy { $0.value != nil }
+      }.map(\.key))
+
+    // Weights read up to and including each node, each counted at its first reader.
+    var counted = Set<String>()
+    var weight = 0
+    var weightAt: [Int] = []
+    for node in g.nodes {
+      for name in node.inputs where !counted.contains(name) {
+        if let w = weightOf[name] {
+          counted.insert(name)
+          weight += w
+        }
+      }
+      weightAt.append(weight)
+    }
+    let total = weight
+
+    var candidates: [(index: Int, tensor: String, weight: Int)] = []
+    var live = Set<String>()
+    for (k, node) in g.nodes.enumerated() {
+      live.formUnion(node.outputs.filter { !$0.isEmpty })
+      live = live.filter { (lastUse[$0] ?? -1) > k }
+      if mask[k], live.count == 1, let t = live.first, shaped.contains(t), !outputs.contains(t) {
+        candidates.append((k, t, weightAt[k]))
+      }
+    }
+    var chosen: [(index: Int, tensor: String)] = []
+    for j in 1..<count {
+      let share = total * j / count
+      guard let best = candidates.filter({ $0.index > (chosen.last?.index ?? -1) }).min(by: { abs($0.weight - share) < abs($1.weight - share) })
+      else { break }
+      chosen.append((best.index, best.tensor))
+    }
+    return chosen
+  }
+
   /// Per node, in graph order: whether it depends on the image inputs alone
   /// (_vision_mask). Nodes reading only initializers count as neither.
   static func visionMask(_ g: Graph) throws -> [Bool] {

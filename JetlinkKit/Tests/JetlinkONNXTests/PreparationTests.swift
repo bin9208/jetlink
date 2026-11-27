@@ -228,10 +228,13 @@ import Testing
     // value keeps a large one's inside, as before carrot.57
     let externalFrom = ProcessInfo.processInfo.environment["JETLINK_PREPARE_EXTERNAL_FROM"].flatMap { Int64($0) }
       ?? CoreMLPreparation.externalWeightsFrom
+    // JETLINK_PREPARE_CHUNK_FROM: a huge value keeps a large model in one piece
+    let chunkFrom = ProcessInfo.processInfo.environment["JETLINK_PREPARE_CHUNK_FROM"].flatMap { Int64($0) }
+      ?? CoreMLPreparation.chunkFrom
     let start = Date()
     let report = try CoreMLPreparation.prepare(
       source: URL(fileURLWithPath: spec[1]), into: URL(fileURLWithPath: spec[2]), layout: layout, cacheKey: { "jetlink\($0)" },
-      experiments: experiments, externalWeightsFrom: externalFrom)
+      experiments: experiments, externalWeightsFrom: externalFrom, chunkFrom: chunkFrom)
     print("prepared in \(Date().timeIntervalSince(start)) s: \(report)")
   }
 
@@ -287,6 +290,43 @@ import Testing
     let wholeReport = try CoreMLPreparation.prepare(
       source: source, into: whole.url, layout: .aneWhole, cacheKey: { $0 }, externalWeightsFrom: 0)
     #expect(wholeReport.parts[0].dataURL == nil)
+  }
+
+  /// A model in chunks: the same nodes in the same order, each chunk reading
+  /// the one tensor the chunk before gives, the graph's inputs where its
+  /// nodes read them, and the graph's outputs from the last; every weight in
+  /// the chunk that reads it.
+  @Test func chunksCutTheTrunkWhereOneTensorCrosses() throws {
+    let bytes = try Data(contentsOf: Fixtures.url("stateful.onnx"))
+    try bytes.withUnsafeBytes { buf in
+      let src = Source(bytes: buf)
+      let (model, g) = try Decode.preparable(src)
+      let chunks = try Split.chunks(model, count: 2)
+      try #require(chunks.count == 2)
+      let graphs = chunks.map { $0.graph! }
+      #expect(graphs.flatMap(\.nodes).map(\.outputs) == g.nodes.map(\.outputs))
+      // a small constant both read (an axes tensor) goes with each
+      #expect(Set(graphs.flatMap(\.initializers).map(\.key)) == Set(g.initializers.map(\.key).filter { name in
+        g.nodes.contains { $0.inputs.contains(name) }
+      }))
+      for (chunk, graph) in graphs.enumerated() {
+        let reads = Set(graph.nodes.flatMap(\.inputs))
+        #expect(graph.initializers.allSatisfy { reads.contains($0.key) }, "chunk \(chunk + 1) holds a weight it never reads")
+      }
+      let cut = graphs[0].outputs.map(\.key)
+      #expect(cut.count == 1)
+      #expect(graphs[1].inputs.map(\.key).first == cut[0])
+      #expect(graphs[1].outputs.map(\.key) == g.outputs.map(\.key))
+      let images = Set(Patches.imageInputs)
+      #expect(graphs[0].inputs.map(\.key).allSatisfy(images.contains))
+      // the rest are graph inputs (this fixture's trunk reads its image queue
+      // past the cut too), and every one the graph has is read somewhere
+      let graphInputs = Set(g.inputs.map(\.key))
+      #expect(Set(graphs[1].inputs.map(\.key).dropFirst()).isSubset(of: graphInputs))
+      #expect(Set(graphs.flatMap { $0.inputs.map(\.key) }).isSuperset(of: graphInputs))
+      // one chunk asked for, or none possible: the model as it was
+      #expect(try Split.chunks(model, count: 1).count == 1)
+    }
   }
 
   /// A source tensor that writes data_location DEFAULT out (BMRLNAP v3's do)

@@ -209,13 +209,14 @@ public enum CoreMLPreparation {
     progress: ((Double) -> Void)? = nil,
     probes: ProbeRequest? = nil,
     experiments: Set<Experiment> = [],
-    externalWeightsFrom: Int64 = CoreMLPreparation.externalWeightsFrom
+    externalWeightsFrom: Int64 = CoreMLPreparation.externalWeightsFrom,
+    chunkFrom: Int64 = CoreMLPreparation.chunkFrom
   ) throws -> Report {
     let data = try Data(contentsOf: source, options: .alwaysMapped)
     return try data.withUnsafeBytes { buf in
       try prepare(
         Source(bytes: buf), into: directory, layout: layout, cacheKey: cacheKey, progress: progress, probes: probes, experiments: experiments,
-        externalWeightsFrom: externalWeightsFrom)
+        externalWeightsFrom: externalWeightsFrom, chunkFrom: chunkFrom)
     }
   }
 
@@ -225,7 +226,8 @@ public enum CoreMLPreparation {
     progress: ((Double) -> Void)?,
     probes probeRequest: ProbeRequest? = nil,
     experiments: Set<Experiment> = [],
-    externalWeightsFrom: Int64
+    externalWeightsFrom: Int64,
+    chunkFrom: Int64
   ) throws -> Report {
     var (model, g) = try Decode.preparable(src)
 
@@ -307,11 +309,22 @@ public enum CoreMLPreparation {
     model.graph = g
 
     var parts: [(name: String, model: Model)]
+    var chunked = false
     switch layout {
     case .split:
       let (vision, policy) = try Split.visionPolicy(model)
       parts = [("vision", vision), ("policy", policy)]
-    case .whole, .aneWhole, .hexagonWhole, .plain:
+    case .hexagonWhole:
+      // carrot.57 kept onnxruntime's copy of a 1.76 GB model off the heap, and
+      // QNN's compile alone still took the Tab S9 Ultra's 5 GB free to 0.4 GB
+      // and Android ended the app (LOW_MEMORY). In chunks of about
+      // `chunkWeights`, compiled one at a time, it holds a chunk's share.
+      let weights = g.initializers.reduce(Int64(0)) { $0 + Int64($1.raw?.count ?? 0) }
+      let count = weights >= chunkFrom ? Int((weights + chunkWeights - 1) / chunkWeights) : 1
+      let chunks = try Split.chunks(model, count: count)
+      chunked = chunks.count > 1
+      parts = chunked ? chunks.enumerated().map { (chunkName($0.offset), $0.element) } : [("model", model)]
+    case .whole, .aneWhole, .plain:
       parts = [("model", model)]
     }
     for i in parts.indices where layout != .plain {
@@ -326,7 +339,8 @@ public enum CoreMLPreparation {
     // (Fold 7 and Tab S9 Ultra, BMRLNAP v3). In a file of their own,
     // onnxruntime maps them instead (40 MB on the heap). The graph and the
     // weights stay byte for byte the same; smaller models keep one file.
-    let external = layout == .hexagonWhole ? externalWeightsFrom : nil
+    // Chunks keep theirs beside them too, whatever their size.
+    let external = layout == .hexagonWhole ? (chunked ? 0 : externalWeightsFrom) : nil
     let reported = try write(parts, src, into: directory, externalFrom: external, progress: progress)
     var report = Report(
       stripped: stripped, retypedImages: retyped, gathers: gathers, gemms: gemms, tiles: tiles,
@@ -345,6 +359,19 @@ public enum CoreMLPreparation {
   /// A part whose initializers' raw_data add up to this many bytes or more
   /// keeps them in `<name>.onnx.data` beside it, for the Hexagon NPU's layout.
   public static let externalWeightsFrom: Int64 = 1 << 30
+
+  /// A model with this many bytes of weights or more goes to the Hexagon NPU
+  /// in chunks (`Split.chunks`) of about `chunkWeights` each.
+  public static let chunkFrom: Int64 = 1 << 30
+  public static let chunkWeights: Int64 = 512 << 20
+
+  /// "chunk1", "chunk2", ...: the parts of a chunked model, run in that order.
+  public static func chunkName(_ index: Int) -> String { "chunk\(index + 1)" }
+
+  /// Whether `name` is a chunk's part name.
+  public static func isChunk(_ name: String) -> Bool {
+    name.hasPrefix("chunk") && Int(name.dropFirst(5)) != nil
+  }
 
   /// A tensor's raw_data this short stays inline, as onnx's
   /// convert_model_to_external_data leaves tensors under its size_threshold.

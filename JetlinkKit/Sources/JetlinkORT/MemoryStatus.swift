@@ -22,7 +22,8 @@ enum MemoryStatus {
     var out: [String: Int64] = [:]
     for line in text.split(separator: "\n") {
       guard let colon = line.firstIndex(of: ":") else { continue }
-      let number = line[line.index(after: colon)...].split(separator: " ").first.flatMap { Int64($0) }
+      // /proc/self/status pads with a tab ("VmRSS:\t  123 kB"), /proc/meminfo with spaces
+      let number = line[line.index(after: colon)...].split(whereSeparator: { $0 == " " || $0 == "\t" }).first.flatMap { Int64($0) }
       if let number { out[String(line[..<colon])] = number }
     }
     return out

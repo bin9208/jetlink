@@ -280,7 +280,13 @@ public final class OrtBackend: EngineBackend {
       }
       log.info("prepared \(model.lastPathComponent): \(prepared.summary)")
       logMemory("prepared")
-      let sessions = profile.sessions
+      var sessions = profile.sessions
+      // A large model on the Hexagon NPU comes in chunks, each a session of
+      // its own on the NPU, compiled one at a time and run in order.
+      if profile.layout == .hexagonWhole, prepared.parts.count > 1, prepared.parts.allSatisfy({ CoreMLPreparation.isChunk($0.name) }) {
+        sessions = prepared.parts.map { (name: $0.name, unit: OrtUnit.htp) }
+        log.info("\(model.lastPathComponent) goes to the NPU in \(sessions.count) chunks, compiled one at a time")
+      }
       guard prepared.parts.map(\.name) == sessions.map(\.name) else {
         throw HostError.failed("the preparation wrote \(prepared.parts.map(\.name)), expected \(sessions.map(\.name))")
       }
