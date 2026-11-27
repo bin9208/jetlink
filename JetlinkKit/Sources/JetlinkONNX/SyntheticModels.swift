@@ -9,11 +9,15 @@ public enum SyntheticModels {
   /// over an input "x" of [1, rows, width] to an output "y" of the same
   /// shape, written to `url`. Its weights are `layers * width * width * 2`
   /// bytes. The values are small and fixed, so every run computes the same.
-  public static func writeLinearStack(layers: Int, width: Int, rows: Int, to url: URL) throws {
+  /// `fp16` makes the graph fp16 end to end, as onnxruntime's QNN provider
+  /// takes it (a FLOAT x would not type-check against the fp16 weights
+  /// there); LiteRT's conversion reads the FLOAT form.
+  public static func writeLinearStack(layers: Int, width: Int, rows: Int, fp16: Bool = false, to url: URL) throws {
     let w = Int64(width)
+    let inputType = fp16 ? DataType.float16 : DataType.float
     var graph = Graph(name: "linear_stack")
-    graph.inputs = [.tensor("x", DataType.float, [1, Int64(rows), w])]
-    graph.outputs = [.tensor("y", DataType.float, [1, Int64(rows), w])]
+    graph.inputs = [.tensor("x", inputType, [1, Int64(rows), w])]
+    graph.outputs = [.tensor("y", inputType, [1, Int64(rows), w])]
     // One weight's and one bias's bytes, shared by every layer's initializer
     // (copy on write): the file holds a copy each, memory one. The weight is
     // pseudo-random, as a trained one looks: MediaTek's compiler shrank an

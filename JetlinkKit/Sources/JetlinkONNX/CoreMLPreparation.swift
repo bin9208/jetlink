@@ -115,7 +115,9 @@ public enum CoreMLPreparation {
     /// A ConvNeXt MLP's Gelu between its two Gemms on their [N, C] with no
     /// reshape either side (`flatElementwiseBetweenGemms`): the same values,
     /// two Reshapes a block fewer; the Gemm rewrite's reshape_out was 12% of
-    /// N16's NPU cycles on a Galaxy Tab S9 (carrot.24).
+    /// N16's NPU cycles on a Galaxy Tab S9 (carrot.24). Out of the sweep: on
+    /// the Tab S9 BMRLNAP ran 121 ms with it against 58 without (carrot.60);
+    /// QNN fuses each Gemm with its reshape, and lost that.
     case flatGelu = "flat-gelu"
     /// ConvNeXt's layer scale in fc2's weight and bias (`foldLayerScale`):
     /// the Muls were 11.7% of BMRLNAP's NPU cycles on a Galaxy Tab S9
@@ -137,12 +139,13 @@ public enum CoreMLPreparation {
     /// 20.5%, gelu 19.9%, the Gemms 19.3%, mul 11.7%, the prescales 7.6%),
     /// and the vision prescale left out or folded, which an 8 Gen 2's N16
     /// did not need for speed but did for precision (carrot.48).
-    public static let swept: [Experiment] = [.foldLayerScale, .flatGelu, .chunks3, .noVisionPrescale, .foldVisionPrescale]
+    /// carrot.61-test: flat-gelu is out (121 ms against 58, carrot.60), and
+    /// fold-vision-prescale (no faster than leaving it out).
+    public static let swept: [Experiment] = [.foldLayerScale, .chunks3, .noVisionPrescale]
 
-    /// None, then each swept experiment alone, then the three exact or
-    /// nearly exact speed ones together.
+    /// None, then each swept experiment alone, then all three together.
     public static var combinations: [Set<Experiment>] {
-      [[]] + swept.map { [$0] } + [[.foldLayerScale, .flatGelu, .chunks3]]
+      [[]] + swept.map { [$0] } + [[.foldLayerScale, .chunks3, .noVisionPrescale]]
     }
   }
 

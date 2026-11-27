@@ -198,9 +198,14 @@ public final class OrtBackend: EngineBackend {
 
   public func experimentBackends() -> [(name: String, backend: any EngineBackend)] {
     guard offersExperiments else { return [] }
-    return CoreMLPreparation.Experiment.combinations.filter { $0 != experiments }.map { set in
+    // The set this backend runs is built and timed too, first, as the
+    // control: an experiment engine runs without the CPU kept warm and late
+    // in a warm phone's benchmark, so it is compared with its own kind
+    // (carrot.60: 54.7 ms for the loaded engine, 56.6-58.6 for experiments).
+    let sets = [experiments] + CoreMLPreparation.Experiment.combinations.filter { $0 != experiments }
+    return sets.enumerated().map { index, set in
       (
-        CoreMLPreparation.Experiment.name(set),
+        CoreMLPreparation.Experiment.name(set) + (index == 0 ? " (control)" : ""),
         OrtBackend(
           profile: profile, preparer: preparer, keepAlive: keepAlive, keepCPUWarm: false, chip: chip, experiments: set) as any EngineBackend
       )

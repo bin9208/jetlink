@@ -226,6 +226,9 @@ extension EngineHost {
       // where the accelerator's time goes, whatever the comparison said
       for line in lines { log.info("benchmark: \(line)") }
       lines = backend.profileOnAccelerator(model: model, directory: directory, progress: progress)
+      // and how fast the accelerator reads weights at all
+      for line in lines { log.info("benchmark: \(line)") }
+      lines = backend.measureBandwidth(directory: directory, progress: progress)
       // and the same engine under each way of running it, side by side
       if let artifact = try? cache.entry(l.sha256).path {
         for line in lines { log.info("benchmark: \(line)") }
