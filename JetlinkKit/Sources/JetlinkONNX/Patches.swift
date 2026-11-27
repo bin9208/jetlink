@@ -258,6 +258,53 @@ enum Patches {
   /// The transposed weights are not made here. Each new initializer is a
   /// recipe over the original's bytes in the mapped file, carried out block
   /// by block when the part is written, so no two are ever in memory at once.
+  /// Ops that act on each element alone, so a reshape around them changes nothing.
+  static let elementwiseUnary: Set<String> = ["Gelu", "Relu", "Sigmoid", "Tanh", "Erf"]
+
+  /// Where `gemmWithTransposedWeight` left a Gemm's output reshaped back to
+  /// [.., C] only for one elementwise op and a reshape to [-1, C] into the
+  /// next Gemm (a ConvNeXt MLP: fc1 -> Gelu -> fc2), the op reads the first
+  /// Gemm's [N, C] and the second Gemm reads the op's: both reshapes go.
+  /// Row-major [.., C] flattened to [-1, C] is the Gemm's own [N, C], so the
+  /// values are the same. Returns how many pairs went.
+  static func flatElementwiseBetweenGemms(_ g: inout Graph) -> Int {
+    var consumers: [String: [Int]] = [:]
+    var producer: [String: Int] = [:]
+    for (k, node) in g.nodes.enumerated() {
+      for name in node.inputs { consumers[name, default: []].append(k) }
+      for name in node.outputs { producer[name] = k }
+    }
+    let outputs = Set(g.outputs.map(\.key))
+    var drop = Set<Int>()
+    var gone = Set<String>()
+    var fused = 0
+    for (k, back) in g.nodes.enumerated() where back.op == "Reshape" && (back.name ?? "").hasSuffix("__reshape_out") {
+      guard let gemmOut = back.inputs.first, let p = producer[gemmOut], g.nodes[p].op == "Gemm",
+        let wide = back.outputs.first, !outputs.contains(wide), let c1 = consumers[wide], c1.count == 1
+      else { continue }
+      let u = c1[0]
+      guard Self.elementwiseUnary.contains(g.nodes[u].op), g.nodes[u].inputs.count == 1, g.nodes[u].outputs.count == 1 else { continue }
+      let unaryOut = g.nodes[u].outputs[0]
+      guard !outputs.contains(unaryOut), let c2 = consumers[unaryOut], c2.count == 1 else { continue }
+      let flat = g.nodes[c2[0]]
+      guard flat.op == "Reshape", (flat.name ?? "").hasSuffix("__reshape_in"), let flatOut = flat.outputs.first,
+        let next = consumers[flatOut], next.allSatisfy({ g.nodes[$0].op == "Gemm" })
+      else { continue }
+      // [-1, C] with the C the Gemm gave: the same stem's shapes
+      g.nodes[u].inputs = [gemmOut]
+      g.nodes[u].outputs = [flatOut]
+      drop.formUnion([k, c2[0]])
+      gone.formUnion([wide, unaryOut])
+      fused += 1
+    }
+    guard fused > 0 else { return 0 }
+    g.nodes = g.nodes.enumerated().filter { !drop.contains($0.offset) }.map(\.element)
+    // the 4-D shapes recorded for the tensors that went, and none for the op's new output
+    g.valueInfo.removeAll { gone.contains($0.key) }
+    dropUnusedInitializers(&g)
+    return fused
+  }
+
   static func gemmWithTransposedWeight(_ g: inout Graph, _ src: Source) throws -> Int {
     let initializers = lastIndexByName(g.initializers)
     var consumers: [String: [Int]] = [:]

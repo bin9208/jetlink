@@ -207,6 +207,13 @@ public final class OrtBackend: EngineBackend {
     }
   }
 
+  /// A model the Hexagon NPU takes in chunks: BMRLNAP's four loaded, a
+  /// variant or an experiment build beside them could not create its
+  /// context (QNN error 1002, Galaxy Tab S9, carrot.58).
+  public func fillsTheAccelerator(model: URL) -> Bool {
+    profile == .htpWhole && Files.size(of: model) >= CoreMLPreparation.chunkFrom
+  }
+
   /// onnxruntime on the CPU for the same chip: what a benchmark checks the
   /// NPU's or the GPU's results against.
   public func referenceBackend() -> (any EngineBackend)? {

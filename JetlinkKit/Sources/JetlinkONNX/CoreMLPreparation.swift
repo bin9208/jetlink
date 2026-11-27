@@ -107,6 +107,15 @@ public enum CoreMLPreparation {
     case normGuardHot192 = "norm-guard-hot-192"
     /// The same, peak 240: closest under fp16's square (65504).
     case normGuardHot240 = "norm-guard-hot-240"
+    /// A model in chunks (`chunkFrom` and up) in two rather than one per
+    /// `chunkWeights`: one NPU call fewer per hand-off, a bigger compile each.
+    /// BMRLNAP in four ran 57.9 ms a frame on a Galaxy Tab S9 (carrot.58).
+    case chunks2 = "chunks-2"
+    /// A ConvNeXt MLP's Gelu between its two Gemms on their [N, C] with no
+    /// reshape either side (`flatElementwiseBetweenGemms`): the same values,
+    /// two Reshapes a block fewer; the Gemm rewrite's reshape_out was 12% of
+    /// N16's NPU cycles on a Galaxy Tab S9 (carrot.24).
+    case flatGelu = "flat-gelu"
 
     public static func < (a: Experiment, b: Experiment) -> Bool { a.rawValue < b.rawValue }
 
@@ -118,11 +127,14 @@ public enum CoreMLPreparation {
     /// What the sweep tries: the precision candidates for an 8 Elite's N16
     /// (carrot.50-test). The vision-prescale ones (carrot.48) were for an
     /// 8 Gen 2's speed and stay switchable but out of the sweep.
-    public static let swept: [Experiment] = [.normGuard224, .normGuardRes224, .normGuardHot224, .normGuardHot192, .normGuardHot240]
+    /// carrot.59-test: the speed candidates for a 1.7 GB model on an 8 Gen 2
+    /// (BMRLNAP 57.9 ms in four chunks), and the plain 224 guard for its
+    /// precision (0.77 m from the CPU against N16's 0.33 m).
+    public static let swept: [Experiment] = [.chunks2, .flatGelu, .normGuard224]
 
-    /// None, then each swept experiment alone.
+    /// None, then each swept experiment alone, then the two speed ones together.
     public static var combinations: [Set<Experiment>] {
-      [[]] + swept.map { [$0] }
+      [[]] + swept.map { [$0] } + [[.chunks2, .flatGelu]]
     }
   }
 
@@ -182,6 +194,8 @@ public enum CoreMLPreparation {
     public var stateIO: Int = 0
     /// Weights made int8 (`int8Weights`); 0 unless asked for.
     public var int8Weights: Int = 0
+    /// Gelus left between two Gemms on their [N, C] (`flat-gelu`).
+    public var flatGelus: Int = 0
     /// The tensors made graph outputs for a probe, in graph order, with the
     /// op that writes each (`Patches.addProbes`); empty unless asked for.
     public var probes: [(name: String, op: String)] = []
@@ -241,11 +255,15 @@ public enum CoreMLPreparation {
     }
     var gathers = 0
     var gemms = 0
+    var flatGelus = 0
     var tiles = 0
     var int8 = 0
     if layout != .plain {
       gathers = try Patches.normalizeGatherIndices(&g, src)
       gemms = try Patches.gemmWithTransposedWeight(&g, src)
+      if layout == .hexagonWhole && experiments.contains(.flatGelu) {
+        flatGelus = Patches.flatElementwiseBetweenGemms(&g)
+      }
       tiles = try Patches.expandToTile(&g, src)
     }
     var norms = 0
@@ -320,7 +338,7 @@ public enum CoreMLPreparation {
       // and Android ended the app (LOW_MEMORY). In chunks of about
       // `chunkWeights`, compiled one at a time, it holds a chunk's share.
       let weights = g.initializers.reduce(Int64(0)) { $0 + Int64($1.raw?.count ?? 0) }
-      let count = weights >= chunkFrom ? Int((weights + chunkWeights - 1) / chunkWeights) : 1
+      let count = weights < chunkFrom ? 1 : experiments.contains(.chunks2) ? 2 : Int((weights + chunkWeights - 1) / chunkWeights)
       let chunks = try Split.chunks(model, count: count)
       chunked = chunks.count > 1
       parts = chunked ? chunks.enumerated().map { (chunkName($0.offset), $0.element) } : [("model", model)]
@@ -352,6 +370,7 @@ public enum CoreMLPreparation {
     report.gelus = gelus
     report.stateIO = stateIO
     report.int8Weights = int8
+    report.flatGelus = flatGelus
     report.probes = probed
     return report
   }

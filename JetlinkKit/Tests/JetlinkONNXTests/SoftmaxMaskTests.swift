@@ -150,10 +150,11 @@ import Testing
     #expect(try values(conv.inputs[1]) == [2, -0.015625])
   }
 
-  @Test("The sweep tries none and each precision experiment alone, never int8 or the vision-prescale ones")
-  func sweepsThePrecisionExperiments() {
+  @Test("The sweep tries none, two chunks, the flat Gelu and the 224 guard alone, then both speed ones together; never int8")
+  func sweepsTheSpeedExperiments() {
     let sets = CoreMLPreparation.Experiment.combinations
-    #expect(sets == [[], [.normGuard224], [.normGuardRes224], [.normGuardHot224], [.normGuardHot192], [.normGuardHot240]])
+    #expect(sets == [[], [.chunks2], [.flatGelu], [.normGuard224], [.chunks2, .flatGelu]])
+    #expect(CoreMLPreparation.Experiment.name([.chunks2, .flatGelu]) == "chunks-2+flat-gelu")
     #expect(CoreMLPreparation.Experiment.name([.foldVisionPrescale]) == "fold-vision-prescale")
     #expect(CoreMLPreparation.Experiment.name([.policyNormGuard]) == "policy-norm-guard")
   }

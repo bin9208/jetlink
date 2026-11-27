@@ -19,52 +19,68 @@ extension OrtBackend {
       try? fm.removeItem(at: dir)
       try fm.createDirectory(at: dir, withIntermediateDirectories: true)
       progress("profile: preparing")
-      _ = try CoreMLPreparation.prepare(source: model, into: dir, layout: profile.layout, cacheKey: { "profile\($0)" })
-      let csv = dir.appending(path: "qnn_profile.csv")
-      var options = providerOptions(unit)
-      options["profiling_level"] = "detailed"
-      options["profiling_file_path"] = csv.path
-      progress("profile: compiling with QNN's profiling")
+      let prepared = try CoreMLPreparation.prepare(source: model, into: dir, layout: profile.layout, cacheKey: { "profile\($0)" })
+      // A model in chunks is profiled a chunk at a time, each compiled and run
+      // alone (on zeros for the hand-offs, which time the same); one CSV of
+      // them all, and a run's time their sum.
+      var combined = ""
       var wall: [Double] = []
-      do {
-        let session = try OrtSession(model: dir.appending(path: "model.onnx"), provider: "QNN", options: options, threads: 1)
-        final class Buffers {
-          var all: [UnsafeMutableRawPointer] = []
-          deinit { all.forEach { $0.deallocate() } }
-          func alloc(_ s: TensorSpec) -> UnsafeMutableRawPointer {
-            let p = UnsafeMutableRawPointer.allocate(byteCount: max(s.byteCount, 1), alignment: 64)
-            p.initializeMemory(as: UInt8.self, repeating: 0, count: max(s.byteCount, 1))
-            all.append(p)
-            return p
-          }
-        }
-        let buffers = Buffers()
-        let inputs = session.inputs.map { ($0, buffers.alloc($0)) }
-        let binding = try OrtBinding(session: session, inputs: inputs, outputs: session.outputs.map { ($0, buffers.alloc($0)) })
-        var seed: UInt64 = 0x9E37_79B9_7F4A_7C15
-        let runs = 23
-        for run in 0..<runs {
-          // changing camera bytes, as a drive gives
-          for (spec, p) in inputs where spec.name.contains("img") {
-            let bytes = p.assumingMemoryBound(to: UInt8.self)
-            for i in stride(from: run % 13, to: spec.byteCount, by: 13) {
-              seed ^= seed << 13
-              seed ^= seed >> 7
-              seed ^= seed << 17
-              bytes[i] = UInt8(truncatingIfNeeded: seed >> 24)
+      for (index, part) in prepared.parts.enumerated() {
+        let label = prepared.parts.count > 1 ? " \(part.name) (\(index + 1)/\(prepared.parts.count))" : ""
+        let csv = dir.appending(path: "qnn_profile_\(part.name).csv")
+        var options = providerOptions(unit)
+        options["profiling_level"] = "detailed"
+        options["profiling_file_path"] = csv.path
+        progress("profile: compiling\(label) with QNN's profiling")
+        var partWall: [Double] = []
+        do {
+          let session = try OrtSession(model: part.url, provider: "QNN", options: options, threads: 1)
+          final class Buffers {
+            var all: [UnsafeMutableRawPointer] = []
+            deinit { all.forEach { $0.deallocate() } }
+            func alloc(_ s: TensorSpec) -> UnsafeMutableRawPointer {
+              let p = UnsafeMutableRawPointer.allocate(byteCount: max(s.byteCount, 1), alignment: 64)
+              p.initializeMemory(as: UInt8.self, repeating: 0, count: max(s.byteCount, 1))
+              all.append(p)
+              return p
             }
           }
-          let t = ProcessInfo.processInfo.systemUptime
-          try binding.run()
-          if run >= 3 { wall.append((ProcessInfo.processInfo.systemUptime - t) * 1000) }
-          progress("profile: run \(run + 1)/\(runs)")
+          let buffers = Buffers()
+          let inputs = session.inputs.map { ($0, buffers.alloc($0)) }
+          let binding = try OrtBinding(session: session, inputs: inputs, outputs: session.outputs.map { ($0, buffers.alloc($0)) })
+          var seed: UInt64 = 0x9E37_79B9_7F4A_7C15
+          let runs = 23
+          for run in 0..<runs {
+            // changing camera bytes, as a drive gives
+            for (spec, p) in inputs where spec.name.contains("img") {
+              let bytes = p.assumingMemoryBound(to: UInt8.self)
+              for i in stride(from: run % 13, to: spec.byteCount, by: 13) {
+                seed ^= seed << 13
+                seed ^= seed >> 7
+                seed ^= seed << 17
+                bytes[i] = UInt8(truncatingIfNeeded: seed >> 24)
+              }
+            }
+            let t = ProcessInfo.processInfo.systemUptime
+            try binding.run()
+            if run >= 3 { partWall.append((ProcessInfo.processInfo.systemUptime - t) * 1000) }
+            progress("profile:\(label) run \(run + 1)/\(runs)")
+          }
         }
+        wall = wall.isEmpty ? partWall : zip(wall, partWall).map { $0 + $1 }
+        // The session is gone: QNN has written its profile.
+        guard let text = try? String(contentsOf: csv, encoding: .utf8) else {
+          return ["profile: QNN wrote no profile at \(csv.lastPathComponent)"]
+        }
+        // one header, the first file's
+        combined += combined.isEmpty ? text : String(text.drop { $0 != "\n" }.dropFirst())
+        if !combined.hasSuffix("\n") { combined += "\n" }
       }
-      // The session is gone: QNN has written its profile.
-      guard let text = try? String(contentsOf: csv, encoding: .utf8) else {
-        return ["profile: QNN wrote no profile at \(csv.lastPathComponent)"]
+      var lines = QnnProfile(csv: combined).summary(wallMs: wall)
+      if prepared.parts.count > 1 {
+        lines.insert("profile: \(prepared.parts.count) chunks, each compiled and run alone; the run is their sum", at: 0)
       }
-      return QnnProfile(csv: text).summary(wallMs: wall)
+      return lines
     } catch {
       return ["profile failed: \(error)"]
     }

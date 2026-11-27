@@ -115,9 +115,14 @@ public protocol EngineBackend: AnyObject, Sendable {
   func experimentBackends() -> [(name: String, backend: any EngineBackend)]
   /// The experiments this backend runs, for the log ("none" if none).
   var experimentName: String? { get }
+  /// Whether this model, loaded, leaves the accelerator no room for another
+  /// build or engine beside it: the benchmark then lets the loaded engine go
+  /// while it profiles, compares variants and sweeps, and loads it again after.
+  func fillsTheAccelerator(model: URL) -> Bool
 }
 
 extension EngineBackend {
+  public func fillsTheAccelerator(model: URL) -> Bool { false }
   public func afterBenchmark(model: URL?, directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }
   public func referenceBackend() -> (any EngineBackend)? { nil }
   public func probeAgainstReference(model: URL, directory: URL, progress: @escaping (String) -> Void) -> [String] { [] }

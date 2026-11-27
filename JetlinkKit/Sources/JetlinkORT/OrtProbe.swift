@@ -1,5 +1,6 @@
 import Foundation
 import JetlinkONNX
+import JetlinkRegistry
 import JetlinkServer
 
 /// Where an accelerator starts computing a model wrong: the model prepared
@@ -37,6 +38,11 @@ extension OrtBackend {
       try? fm.removeItem(at: cpuDir)
       try fm.createDirectory(at: accelDir, withIntermediateDirectories: true)
       try fm.createDirectory(at: cpuDir, withIntermediateDirectories: true)
+      // Its probes would have to cross the chunks, and in one piece the
+      // NPU's compile does not fit a 12 GB phone (carrot.57).
+      if layout == .hexagonWhole, Files.size(of: model) >= CoreMLPreparation.chunkFrom {
+        return ["probe: not for a model the NPU takes in chunks"]
+      }
       progress("probe: preparing")
       let accelReport = try CoreMLPreparation.prepare(
         source: model, into: accelDir, layout: layout, cacheKey: { "probe\($0)" }, probes: .init())

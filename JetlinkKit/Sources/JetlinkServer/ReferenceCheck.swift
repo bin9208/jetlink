@@ -201,6 +201,21 @@ extension EngineHost {
         String(
           format: "CPU reference %@: %.0f ms a frame, %.0f s in all", reference.deviceTag(), cpuMean,
           ProcessInfo.processInfo.systemUptime - started))
+      // A model that fills the NPU goes for what follows, each step its own
+      // build or engine, and comes back when the benchmark is done with it.
+      let makeRoom = backend.fillsTheAccelerator(model: model)
+      if makeRoom {
+        for line in lines { log.info("benchmark: \(line)") }
+        lines = []
+        log.info("benchmark: the engine fills the NPU; unloading it for the profile, variants and experiments")
+        unload()
+      }
+      defer {
+        if makeRoom {
+          log.info("benchmark: loading the engine again")
+          preload()
+        }
+      }
       if comparison.wantsProbe {
         for line in lines { log.info("benchmark: \(line)") }
         lines = backend.probeAgainstReference(model: model, directory: directory, progress: progress)
