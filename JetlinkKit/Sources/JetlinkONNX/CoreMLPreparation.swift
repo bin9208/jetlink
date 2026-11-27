@@ -107,15 +107,20 @@ public enum CoreMLPreparation {
     case normGuardHot192 = "norm-guard-hot-192"
     /// The same, peak 240: closest under fp16's square (65504).
     case normGuardHot240 = "norm-guard-hot-240"
-    /// A model in chunks (`chunkFrom` and up) in two rather than one per
-    /// `chunkWeights`: one NPU call fewer per hand-off, a bigger compile each.
-    /// BMRLNAP in four ran 57.9 ms a frame on a Galaxy Tab S9 (carrot.58).
-    case chunks2 = "chunks-2"
+    /// A model in chunks (`chunkFrom` and up) in three rather than one per
+    /// `chunkWeights`: one NPU call fewer, ~590 MB a compile. carrot.59's
+    /// chunks-2 (~880 MB) took a Galaxy Tab S9 to 0.4 GB free and Android
+    /// ended the app. BMRLNAP in four ran 57.9 ms a frame there (carrot.58).
+    case chunks3 = "chunks-3"
     /// A ConvNeXt MLP's Gelu between its two Gemms on their [N, C] with no
     /// reshape either side (`flatElementwiseBetweenGemms`): the same values,
     /// two Reshapes a block fewer; the Gemm rewrite's reshape_out was 12% of
     /// N16's NPU cycles on a Galaxy Tab S9 (carrot.24).
     case flatGelu = "flat-gelu"
+    /// ConvNeXt's layer scale in fc2's weight and bias (`foldLayerScale`):
+    /// the Muls were 11.7% of BMRLNAP's NPU cycles on a Galaxy Tab S9
+    /// (carrot.59); each scaled weight rounds once more in fp16.
+    case foldLayerScale = "fold-layer-scale"
 
     public static func < (a: Experiment, b: Experiment) -> Bool { a.rawValue < b.rawValue }
 
@@ -127,14 +132,17 @@ public enum CoreMLPreparation {
     /// What the sweep tries: the precision candidates for an 8 Elite's N16
     /// (carrot.50-test). The vision-prescale ones (carrot.48) were for an
     /// 8 Gen 2's speed and stay switchable but out of the sweep.
-    /// carrot.59-test: the speed candidates for a 1.7 GB model on an 8 Gen 2
-    /// (BMRLNAP 57.9 ms in four chunks), and the plain 224 guard for its
-    /// precision (0.77 m from the CPU against N16's 0.33 m).
-    public static let swept: [Experiment] = [.chunks2, .flatGelu, .normGuard224]
+    /// carrot.60-test: the speed candidates for a 1.7 GB model on an 8 Gen 2
+    /// (BMRLNAP 57.9 ms in four chunks; by carrot.59's profile layer_norm
+    /// 20.5%, gelu 19.9%, the Gemms 19.3%, mul 11.7%, the prescales 7.6%),
+    /// and the vision prescale left out or folded, which an 8 Gen 2's N16
+    /// did not need for speed but did for precision (carrot.48).
+    public static let swept: [Experiment] = [.foldLayerScale, .flatGelu, .chunks3, .noVisionPrescale, .foldVisionPrescale]
 
-    /// None, then each swept experiment alone, then the two speed ones together.
+    /// None, then each swept experiment alone, then the three exact or
+    /// nearly exact speed ones together.
     public static var combinations: [Set<Experiment>] {
-      [[]] + swept.map { [$0] } + [[.chunks2, .flatGelu]]
+      [[]] + swept.map { [$0] } + [[.foldLayerScale, .flatGelu, .chunks3]]
     }
   }
 
@@ -196,6 +204,8 @@ public enum CoreMLPreparation {
     public var int8Weights: Int = 0
     /// Gelus left between two Gemms on their [N, C] (`flat-gelu`).
     public var flatGelus: Int = 0
+    /// Layer scales taken into fc2 (`fold-layer-scale`).
+    public var layerScales: Int = 0
     /// The tensors made graph outputs for a probe, in graph order, with the
     /// op that writes each (`Patches.addProbes`); empty unless asked for.
     public var probes: [(name: String, op: String)] = []
@@ -256,6 +266,7 @@ public enum CoreMLPreparation {
     var gathers = 0
     var gemms = 0
     var flatGelus = 0
+    var layerScales = 0
     var tiles = 0
     var int8 = 0
     if layout != .plain {
@@ -263,6 +274,9 @@ public enum CoreMLPreparation {
       gemms = try Patches.gemmWithTransposedWeight(&g, src)
       if layout == .hexagonWhole && experiments.contains(.flatGelu) {
         flatGelus = Patches.flatElementwiseBetweenGemms(&g)
+      }
+      if layout == .hexagonWhole && experiments.contains(.foldLayerScale) {
+        layerScales = try Patches.foldLayerScale(&g, src)
       }
       tiles = try Patches.expandToTile(&g, src)
     }
@@ -338,7 +352,7 @@ public enum CoreMLPreparation {
       // and Android ended the app (LOW_MEMORY). In chunks of about
       // `chunkWeights`, compiled one at a time, it holds a chunk's share.
       let weights = g.initializers.reduce(Int64(0)) { $0 + Int64($1.raw?.count ?? 0) }
-      let count = weights < chunkFrom ? 1 : experiments.contains(.chunks2) ? 2 : Int((weights + chunkWeights - 1) / chunkWeights)
+      let count = weights < chunkFrom ? 1 : experiments.contains(.chunks3) ? 3 : Int((weights + chunkWeights - 1) / chunkWeights)
       let chunks = try Split.chunks(model, count: count)
       chunked = chunks.count > 1
       parts = chunked ? chunks.enumerated().map { (chunkName($0.offset), $0.element) } : [("model", model)]
@@ -371,6 +385,7 @@ public enum CoreMLPreparation {
     report.stateIO = stateIO
     report.int8Weights = int8
     report.flatGelus = flatGelus
+    report.layerScales = layerScales
     report.probes = probed
     return report
   }
@@ -564,6 +579,36 @@ final class PartWriter {
     }
   }
 
+  /// Output rows j0..<j1 of a band, `rows` elements each, times scale[j], in
+  /// fp32 and rounded back: what numpy's (w.astype(float32) * s).astype(w.dtype) gives.
+  static func scaleRows(
+    _ band: UnsafeMutableRawPointer, rows: Int, from j0: Int, to j1: Int, _ scale: [Float], elementSize: Int
+  ) throws {
+    guard scale.count >= j1 else { throw OnnxError("a row scale has \(scale.count) values where \(j1) rows need one") }
+    switch elementSize {
+    case 2:
+      let p = band.assumingMemoryBound(to: UInt16.self)
+      for r in 0..<(j1 - j0) {
+        let s = scale[j0 + r]
+        for k in 0..<rows {
+          let i = r * rows + k
+          p[i] = Float16(Float(Float16(bitPattern: UInt16(littleEndian: p[i]))) * s).bitPattern.littleEndian
+        }
+      }
+    case 4:
+      let p = band.assumingMemoryBound(to: UInt32.self)
+      for r in 0..<(j1 - j0) {
+        let s = scale[j0 + r]
+        for k in 0..<rows {
+          let i = r * rows + k
+          p[i] = (Float(bitPattern: UInt32(littleEndian: p[i])) * s).bitPattern.littleEndian
+        }
+      }
+    default:
+      throw OnnxError("a row scale on \(elementSize)-byte elements")
+    }
+  }
+
   /// Writes the [cols, rows] transpose of a row-major [rows, cols] matrix, a
   /// block of output rows at a time. Each block reads a narrow column band
   /// of every source row, so the reads stay sequential within a row.
@@ -595,6 +640,9 @@ final class PartWriter {
               (to + ((j - j0) * rows + i) * size).copyMemory(from: from + (i * cols + j) * size, byteCount: size)
             }
           }
+        }
+        if let scale = t.rowScale {
+          try PartWriter.scaleRows(to, rows: rows, from: j0, to: j1, scale, elementSize: size)
         }
         let n = (j1 - j0) * rowBytes
         let band = UnsafeRawBufferPointer(start: to, count: n)

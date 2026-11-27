@@ -209,6 +209,9 @@ extension EngineHost {
         lines = []
         log.info("benchmark: the engine fills the NPU; unloading it for the profile, variants and experiments")
         unload()
+        // and the CPU's engine (BMRLNAP's held 2 GB): its outputs are kept,
+        // the sweep compares with those
+        cpu.close()
       }
       defer {
         if makeRoom {

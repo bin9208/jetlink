@@ -79,6 +79,9 @@ public struct ONNXPreparer: ModelPreparer {
     if report.flatGelus > 0 {
       summary += "; \(report.flatGelus) Gelu(s) between two Gemms without their reshapes"
     }
+    if report.layerScales > 0 {
+      summary += "; \(report.layerScales) layer scale(s) taken into fc2"
+    }
     if report.parts.count > 1, report.parts.allSatisfy({ CoreMLPreparation.isChunk($0.name) }) {
       summary += "; in \(report.parts.count) chunks of "
         + report.parts.map { String(format: "%.0f MB", Double($0.weightBytes) / 1e6) }.joined(separator: ", ")

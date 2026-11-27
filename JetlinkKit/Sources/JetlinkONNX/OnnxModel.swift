@@ -195,6 +195,9 @@ struct Transpose {
   let rows: Int
   let cols: Int
   let elementSize: Int
+  /// Each output row (each of the `cols`) times this, in fp32 and rounded
+  /// back to the weight's type as it is written (`fold-layer-scale`).
+  var rowScale: [Float]? = nil
 
   var byteCount: Int { rows * cols * elementSize }
 }

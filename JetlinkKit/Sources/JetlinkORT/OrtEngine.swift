@@ -85,7 +85,10 @@ public final class OrtEngine: EngineCore, @unchecked Sendable {
   public let usesSharedMemory: Bool
   public override var coolsWhenIdle: Bool { usesNeuralEngine }
 
-  private let chain: [OrtSession]
+  /// Emptied by `close`: a closed engine its host still holds must not keep
+  /// the NPU's contexts (carrot.59: BMRLNAP's four, "unloaded" for the
+  /// benchmark's sweep, still took the room a variant needed, QNN error 1002).
+  private var chain: [OrtSession]
   private var bindings: [[OrtBinding]] = []  // [parity][session]
   private let keepAlive: MetalKeepAlive?
   private let keepWarm: CPUKeepWarm?
@@ -225,5 +228,7 @@ public final class OrtEngine: EngineCore, @unchecked Sendable {
     // They bind the buffers the core frees.
     bindings = []
     super.close()
+    // The sessions go now, not when the last reference to the engine does.
+    chain = []
   }
 }

@@ -305,6 +305,71 @@ enum Patches {
     return fused
   }
 
+  /// ConvNeXt's layer scale (`gamma * x` after the MLP's fc2) taken into fc2:
+  /// where a Gemm the rewrite gave a transposed weight is reshaped back,
+  /// transposed to NCHW and multiplied by a constant [1, C, 1, 1] (or [C])
+  /// with no other reader on the way, each of the weight's output rows and
+  /// the bias go times their channel's scale (in fp32, rounded back to fp16
+  /// as the weight is written) and the Mul goes. BMRLNAP on a Galaxy Tab S9:
+  /// the Muls were 11.7% of the NPU's cycles (carrot.59's profile). Not the
+  /// same values: each scaled weight rounds once more. Returns how many.
+  static func foldLayerScale(_ g: inout Graph, _ src: Source) throws -> Int {
+    var consumers: [String: [Int]] = [:]
+    var producer: [String: Int] = [:]
+    for (k, node) in g.nodes.enumerated() {
+      for name in node.inputs { consumers[name, default: []].append(k) }
+      for name in node.outputs { producer[name] = k }
+    }
+    let initializers = lastIndexByName(g.initializers)
+    let outputs = Set(g.outputs.map(\.key))
+    func only(_ name: String) -> Int? {
+      guard !outputs.contains(name), let c = consumers[name], c.count == 1 else { return nil }
+      return c[0]
+    }
+    var drop = Set<Int>()
+    var gone = Set<String>()
+    var folded = 0
+    for (m, mul) in g.nodes.enumerated() where mul.op == "Mul" && mul.inputs.count == 2 {
+      // which input is the scale, which the transposed activations
+      guard let si = mul.inputs.firstIndex(where: { initializers[$0] != nil }) else { continue }
+      let scaleName = mul.inputs[si]
+      let x = mul.inputs[1 - si]
+      guard let t = producer[x], g.nodes[t].op == "Transpose", only(x) == m,
+        g.nodes[t].attribute("perm")?.ints == [0, 3, 1, 2],
+        let r = producer[g.nodes[t].inputs[0]], g.nodes[r].op == "Reshape", only(g.nodes[r].outputs[0]) == t,
+        let k = producer[g.nodes[r].inputs[0]], g.nodes[k].op == "Gemm", only(g.nodes[k].outputs[0]) == r,
+        g.nodes[k].inputs.count == 3, g.nodes[k].attribute("transB")?.i == 1,
+        let wi = initializers[g.nodes[k].inputs[1]], let bi = initializers[g.nodes[k].inputs[2]],
+        consumers[g.nodes[k].inputs[1]]?.count == 1, consumers[g.nodes[k].inputs[2]]?.count == 1,
+        consumers[scaleName]?.count == 1,
+        case .transposed(var tr) = g.initializers[wi].raw, tr.rowScale == nil
+      else { continue }
+      let scaleTensor = g.initializers[initializers[scaleName]!]
+      let channels = tr.cols
+      guard scaleTensor.elementCount == channels,
+        scaleTensor.dims == [1, Int64(channels), 1, 1] || scaleTensor.dims == [Int64(channels)]
+      else { continue }
+      let scale = try Elements.floats(Elements.littleEndian(scaleTensor, src), as: scaleTensor.elementType, for: scaleName)
+      let bias = g.initializers[bi]
+      guard bias.elementCount == channels else { continue }
+      let b = try Elements.floats(Elements.littleEndian(bias, src), as: bias.elementType, for: bias.key)
+      tr.rowScale = scale
+      g.initializers[wi].raw = .transposed(tr)
+      g.initializers[bi].raw = .owned(Elements.encode(zip(b, scale).map { $0 * $1 }, as: bias.elementType))
+      g.initializers[bi].typed = [:]
+      // the Transpose writes what the Mul wrote
+      gone.insert(x)
+      g.nodes[t].outputs = mul.outputs
+      drop.insert(m)
+      folded += 1
+    }
+    guard folded > 0 else { return 0 }
+    g.nodes = g.nodes.enumerated().filter { !drop.contains($0.offset) }.map(\.element)
+    g.valueInfo.removeAll { gone.contains($0.key) }
+    dropUnusedInitializers(&g)
+    return folded
+  }
+
   static func gemmWithTransposedWeight(_ g: inout Graph, _ src: Source) throws -> Int {
     let initializers = lastIndexByName(g.initializers)
     var consumers: [String: [Int]] = [:]
