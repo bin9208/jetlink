@@ -628,7 +628,19 @@ public enum KnownModels {
     Known(
       sha256: "01effc679eb46d6036ce0302673a87fe2dcfcc95a679daeeb929679e53c3647a", bytes: 814_591_107,
       name: "N16 Nav (carrot)", shortName: "N16",
-      url: "https://upload.shind0.synology.me/models/comma4-big-nav-n16-96244b1f/big_driving_supercombo.onnx")
+      url: "https://upload.shind0.synology.me/models/comma4-big-nav-n16-96244b1f/big_driving_supercombo.onnx"),
+    // LS2 with N16's map and navigation encoders added at its two desire
+    // layers, trained on rlog paths through turns (stateful, like N16)
+    Known(
+      sha256: "12f8356d0e96f2808e3753cbb55c0021d9f6093e11670a8e0487b32afaf97180", bytes: 791_023_125,
+      name: "LS2 Nav (carrot)", shortName: "LS2-Nav",
+      url: "https://lunabox.myqnapcloud.com/share.cgi?ssid=646f506bd41d486b99da92e35572ad1b&fid=646f506bd41d486b99da92e35572ad1b&open=normal&ep="),
+    // BMRLNAP (August 20, 2026) with the same map encoder, wrapped in N16's
+    // stateful interface so the map reaches it (the queued path takes none)
+    Known(
+      sha256: "a5ee04acf37a3528c04f601358c2457fd0970c8c550af16c23f8010c857df8de", bytes: 1_786_430_748,
+      name: "BM Nav (carrot)", shortName: "BM-Nav",
+      url: "https://lunabox.myqnapcloud.com/share.cgi?ssid=a9bf9e3ef7304fdb8f6d144d19fd59bb&fid=a9bf9e3ef7304fdb8f6d144d19fd59bb&open=normal&ep="),
   ]
 
   /// How long a download from carrot's model library may wait for data, and

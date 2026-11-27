@@ -47,4 +47,18 @@ struct KnownCatalogTests {
     #expect(try await registry.pointer(for: n16.sha256!) == pointer)
     #expect(registry.size(for: n16.sha256!) == 814_591_107)
   }
+
+  @Test func theNavStudentsFollowN16WithTheirSizes() async throws {
+    let tmp = try TemporaryDirectory()
+    let registry = Registry(layout: tmp.layout, session: MockNet([:]).session)
+    let catalog = await registry.catalog().withKnownModels()
+    #expect(catalog.models.map(\.name).prefix(3) == ["N16 Nav (carrot)", "LS2 Nav (carrot)", "BM Nav (carrot)"])
+    for (name, prefix, bytes) in [("LS2 Nav (carrot)", "12f8356d0e96f280", Int64(791_023_125)), ("BM Nav (carrot)", "a5ee04acf37a3528", Int64(1_786_430_748))] {
+      let row = try #require(catalog.models.first { $0.name == name })
+      #expect(row.sha256?.hasPrefix(prefix) == true && row.bytes == bytes && row.folder == "Carrot")
+      let pointer = try await registry.resolve(ref: row.ref)
+      #expect(pointer.oid == row.sha256 && pointer.size == bytes)
+      #expect(KnownModels.bySHA(row.sha256!)?.url.hasPrefix("https://lunabox.myqnapcloud.com/share.cgi?ssid=") == true)
+    }
+  }
 }
