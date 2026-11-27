@@ -109,8 +109,16 @@ enum Patches {
     // producer before its consumers.
     var retyped = Set(sources)
     var casts: [Int] = []
+    // A Cast to uint8 on the uint8 chain changes nothing and goes with the
+    // head Casts: BM Nav (carrot.62) wraps the queued BMRLNAP in N16's
+    // stateful interface and hands the queue's frames to `img` and `big_img`
+    // through Cast(to: UINT8); left in, it would turn the fp16 images back.
+    var identities: [Int] = []
     for (k, node) in g.nodes.enumerated() where node.inputs.contains(where: retyped.contains) {
-      if node.op == "Cast" {
+      if node.op == "Cast", node.attribute("to")?.i == Int64(DataType.uint8) {
+        identities.append(k)
+        retyped.formUnion(node.outputs)
+      } else if node.op == "Cast" {
         casts.append(k)
       } else if layoutOps.contains(node.op) {
         retyped.formUnion(node.outputs)
@@ -141,13 +149,19 @@ enum Patches {
     // removes each cast right after its renames; removing them all after all
     // the renames ends the same, since a rename that reaches a cast only
     // touches a node that is dropped anyway.
-    for k in casts {
+    for k in identities {
+      if let out = g.nodes[k].outputs.first, graphOutputs.contains(out) {
+        throw OnnxError("uint8 Cast \(g.nodes[k].displayName) feeds a graph output; dropping it would rename one")
+      }
+    }
+    let dropped = (casts + identities).sorted()
+    for k in dropped {
       let cast = g.nodes[k]
       if let source = cast.inputs.first, let produced = cast.outputs.first {
         rename(&g, inputs: produced, to: source)
       }
     }
-    for k in casts.reversed() {
+    for k in dropped.reversed() {
       g.nodes.remove(at: k)
     }
 
@@ -532,7 +546,7 @@ enum Patches {
     for node in g.nodes where node.op == "Mul" && node.inputs.count == 2 && node.inputs[1] == const {
       if let out = node.outputs.first { already.insert(out) }
     }
-    let types = staticTypes(g)
+    let types = inferredTypes(g)
     var new: [Node] = []
     new.reserveCapacity(g.nodes.count + norms.count)
     var scaled: [String: String] = [:]
@@ -1043,7 +1057,7 @@ enum Patches {
     }
     let lo = "__tanh_gelu_lo", hi = "__tanh_gelu_hi", c1 = "__tanh_gelu_c1", c3 = "__tanh_gelu_c3", one = "__tanh_gelu_one",
       halfName = "__tanh_gelu_half"
-    let types = staticTypes(g)
+    let types = inferredTypes(g)
     for node in g.nodes {
       // fp16 exact Gelu only: an fp32 one keeps its precision as it is
       guard node.op == "Gelu", node.inputs.count == 1, node.outputs.count == 1, (node.attribute("approximate")?.s ?? "none") == "none",
@@ -1118,7 +1132,7 @@ enum Patches {
     for node in g.nodes where node.op == "Mul" && node.inputs.count == 2 && (node.inputs[1] == policyConst || node.inputs[1] == const) {
       if let out = node.outputs.first { scaledByPolicy.insert(out) }
     }
-    let types = staticTypes(g)
+    let types = inferredTypes(g)
     var producer: [String: Int] = [:]
     var uses: [String: Int] = [:]
     for (i, n) in g.nodes.enumerated() {
@@ -1481,7 +1495,7 @@ enum Patches {
         }
       }
     }
-    let types = staticTypes(g)
+    let types = inferredTypes(g)
     // Python asks the shape inferrer for an entry the file does not type;
     // Swift has none (see prescaleLayerNorm).
     if let untyped = entries.filter({ types[$0] == nil }).sorted(by: pyLess).first {
@@ -1608,6 +1622,63 @@ enum Patches {
     var types: [String: Int32] = [:]
     for vi in g.inputs + g.valueInfo + g.outputs where vi.elemType != 0 {
       types[vi.key] = vi.elemType
+    }
+    return types
+  }
+
+  /// Ops whose outputs take the type of their first typed data input, as
+  /// onnx's type inference gives them.
+  static let typeFollowsInput: Set<String> = [
+    "Add", "Sub", "Mul", "Div", "Pow", "Max", "Min", "Neg", "Abs", "Sqrt", "Exp", "Log", "Reciprocal", "Erf",
+    "Relu", "Gelu", "Sigmoid", "Tanh", "Softmax", "LayerNormalization", "MatMul", "Gemm", "Conv", "ConvTranspose",
+    "ReduceMean", "ReduceMax", "ReduceMin", "ReduceSum", "Clip", "Transpose", "Reshape", "Squeeze", "Unsqueeze",
+    "Flatten", "Expand", "Tile", "Identity", "Concat", "Split", "Slice", "Gather", "GatherND", "Pad", "Resize",
+    "AveragePool", "MaxPool", "GlobalAveragePool", "BatchNormalization", "InstanceNormalization", "Dropout",
+  ]
+  /// Ops whose outputs are bool, and the int64 ones.
+  static let boolOutputs: Set<String> = ["Equal", "Less", "LessOrEqual", "Greater", "GreaterOrEqual", "Not", "And", "Or", "Xor", "IsNaN", "IsInf"]
+  static let int64Outputs: Set<String> = ["Shape", "Size", "NonZero", "ArgMax", "ArgMin"]
+
+  /// `staticTypes`, and for a node output the file does not type, the type
+  /// onnx's inference would give it from the node's inputs (Cast its `to`,
+  /// Where its values', a Constant its tensor's, most ops their first typed
+  /// data input's), in graph order. Python's preparation asks onnx's shape
+  /// inferrer for these; LS2 Nav (carrot.62) merged N16's map and navigation
+  /// encoders in without their 177 tensors' types, and its policy norms could
+  /// not be prescaled ("the export records no type for nav/permute_83"). A
+  /// recorded type always stands.
+  static func inferredTypes(_ g: Graph) -> [String: Int32] {
+    var types = staticTypes(g)
+    for t in g.initializers where t.elementType != 0 && types[t.key] == nil {
+      types[t.key] = t.elementType
+    }
+    for node in g.nodes {
+      let missing = node.outputs.filter { !$0.isEmpty && types[$0] == nil }
+      guard !missing.isEmpty else { continue }
+      var type: Int32?
+      switch node.op {
+      case "Cast":
+        type = node.attribute("to").map { Int32(truncatingIfNeeded: $0.i) }
+      case "Where":
+        type = node.inputs.dropFirst().lazy.compactMap { types[$0] }.first
+      case "Constant":
+        type = node.attribute("value")?.t?.elementType
+      case _ where boolOutputs.contains(node.op):
+        type = DataType.bool
+      case _ where int64Outputs.contains(node.op):
+        type = DataType.int64
+      case _ where typeFollowsInput.contains(node.op):
+        type = node.inputs.lazy.filter { !$0.isEmpty }.compactMap { types[$0] }.first
+      default:
+        type = nil
+      }
+      guard let type, type != 0 else { continue }
+      // LayerNormalization's and Dropout's other outputs (mean, mask) are not
+      // what is read here; only the first is typed for them.
+      let typedOutputs = ["LayerNormalization", "Dropout", "BatchNormalization"].contains(node.op) ? [node.outputs[0]] : node.outputs
+      for name in typedOutputs where !name.isEmpty && types[name] == nil {
+        types[name] = type
+      }
     }
     return types
   }

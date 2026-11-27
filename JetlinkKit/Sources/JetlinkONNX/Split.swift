@@ -45,8 +45,8 @@ enum Split {
   /// The model in `count` chunks run one after the other, cut inside the
   /// vision trunk where a single tensor alone crosses (a block's output),
   /// each cut where the weights read so far come nearest an equal share.
-  /// Chunk i reads the cut before it and the graph inputs its nodes read,
-  /// and gives the cut after it and any graph output it makes; the last
+  /// Chunk i reads the cut before it and the graph inputs its outputs reach
+  /// back to, and gives the cut after it and any graph output it makes; the last
   /// holds the rest of the trunk and the policy. Fewer chunks when the trunk
   /// has fewer such places; one when it has none.
   ///
@@ -64,21 +64,50 @@ enum Split {
     for (k, node) in g.nodes.enumerated() {
       for name in node.outputs where !name.isEmpty { producedAt[name] = k }
     }
+    let graphInputSet = Set(graphInputs)
     var models: [Model] = []
     var start = 0
     var previous: String?
     for (end, tensor) in cuts.map({ ($0.index, $0.tensor) }) + [(g.nodes.count - 1, nil as String?)] {
-      let nodes = g.nodes[start...end]
-      var read = Set<String>()
-      for node in nodes { read.formUnion(node.inputs) }
-      let inputs = (previous.map { [$0] } ?? []) + graphInputs.filter(read.contains)
       let made = graphOutputs.filter { producedAt[$0].map { (start...end).contains($0) } ?? false }
       let outputs = (tensor.map { [$0] } ?? []) + made
+      // The graph inputs the chunk's outputs reach back to, past the cut
+      // before: a node that works on graph inputs alone (a queue's Slice
+      // and Cast) is made again in each chunk that reads it, wherever it
+      // sits in the graph's order.
+      var reached = Set<String>()
+      var seen = Set<String>()
+      var stack = outputs
+      while let name = stack.popLast() {
+        guard seen.insert(name).inserted, name != previous else { continue }
+        if graphInputSet.contains(name) {
+          reached.insert(name)
+        } else if let k = producedAt[name] {
+          stack.append(contentsOf: g.nodes[k].inputs.filter { !$0.isEmpty })
+        }
+      }
+      let inputs = (previous.map { [$0] } ?? []) + graphInputs.filter(reached.contains)
       models.append(try extractor.extract(inputs: inputs, outputs: outputs))
       previous = tensor
       start = end + 1
     }
     return models
+  }
+
+  /// Tensors made from the graph's inputs other than the images, and
+  /// initializers, alone (and those inputs): what any chunk can make again
+  /// for itself, so they do not count as crossing a cut. BM Nav's wrapper
+  /// slices and casts its desire and feature queues ahead of the trunk.
+  static func sideTensors(_ g: Graph) -> Set<String> {
+    let initializers = Set(g.initializers.map(\.key))
+    var side = Set(g.inputs.map(\.key).filter { !Patches.imageInputs.contains($0) })
+    for node in g.nodes {
+      let data = node.inputs.filter { !$0.isEmpty && !initializers.contains($0) }
+      if data.allSatisfy(side.contains) {
+        side.formUnion(node.outputs.filter { !$0.isEmpty })
+      }
+    }
+    return side
   }
 
   /// Where `chunks` cuts: (the node after which, the one tensor crossing),
@@ -91,8 +120,10 @@ enum Split {
     for (k, node) in g.nodes.enumerated() {
       for name in node.inputs where !name.isEmpty { lastUse[name] = k }
     }
+    // A graph output crosses a cut only if a later node reads it: the chunk
+    // that makes it gives it out (`chunks`). BM Nav's wrapper makes
+    // next_state_img_q first; counted live to the end, it left no cut.
     let outputs = Set(g.outputs.map(\.key))
-    for name in outputs { lastUse[name] = g.nodes.count }
     let shaped = Set(
       (g.inputs + g.valueInfo + g.outputs).filter { vi in
         guard let dims = vi.shape?.dims else { return false }
@@ -116,8 +147,9 @@ enum Split {
 
     var candidates: [(index: Int, tensor: String, weight: Int)] = []
     var live = Set<String>()
+    let side = sideTensors(g)
     for (k, node) in g.nodes.enumerated() {
-      live.formUnion(node.outputs.filter { !$0.isEmpty })
+      live.formUnion(node.outputs.filter { !$0.isEmpty && !side.contains($0) })
       live = live.filter { (lastUse[$0] ?? -1) > k }
       if mask[k], live.count == 1, let t = live.first, shaped.contains(t), !outputs.contains(t) {
         candidates.append((k, t, weightAt[k]))

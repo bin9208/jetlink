@@ -73,18 +73,10 @@ import Testing
       #expect(try FileManager.default.contentsOfDirectory(atPath: out.url.path).isEmpty)
       return
     }
-    if fixture == "notype" || fixture == "noentry", layout == .aneWhole {
-      // Python asks onnx's shape inferrer for the type of a policy norm's
-      // input (notype) or a head's entry (noentry) and carries on; Swift
-      // refuses rather than prepare something else.
-      #expect(expected.norms == 3 && expected.heads == 6)
-      let tensor = fixture == "notype" ? "p" : "vm"
-      #expect(throws: OnnxError("the export records no type for \(tensor); this model cannot be prepared on iPhone or iPad")) {
-        try prepare()
-      }
-      #expect(try FileManager.default.contentsOfDirectory(atPath: out.url.path).isEmpty)
-      return
-    }
+    // notype and noentry (ane-whole): Python asks onnx's shape inferrer for
+    // the type of a policy norm's input or a head's entry and carries on;
+    // Swift's inferredTypes now gives the same type (carrot.63: LS2 Nav), so
+    // they are held to Python's counts and bytes like the rest.
     if let message = expected.error {
       #expect(throws: OnnxError(message)) { try prepare() }
       #expect(try FileManager.default.contentsOfDirectory(atPath: out.url.path).isEmpty)
@@ -313,10 +305,14 @@ import Testing
         let reads = Set(graph.nodes.flatMap(\.inputs))
         #expect(graph.initializers.allSatisfy { reads.contains($0.key) }, "chunk \(chunk + 1) holds a weight it never reads")
       }
-      let cut = graphs[0].outputs.map(\.key)
-      #expect(cut.count == 1)
-      #expect(graphs[1].inputs.map(\.key).first == cut[0])
-      #expect(graphs[1].outputs.map(\.key) == g.outputs.map(\.key))
+      // the first chunk's first output is the cut; a graph output it makes
+      // (the image queue's next state) it gives out itself
+      let cut = try #require(graphs[0].outputs.first?.key)
+      #expect(graphs[1].inputs.map(\.key).first == cut)
+      #expect(!g.outputs.map(\.key).contains(cut))
+      let given = graphs.flatMap { $0.outputs.map(\.key) }.filter { $0 != cut }
+      #expect(given.sorted() == g.outputs.map(\.key).sorted())
+      #expect(Set(given).count == given.count, "a graph output given out twice")
       let images = Set(Patches.imageInputs)
       #expect(graphs[0].inputs.map(\.key).allSatisfy(images.contains))
       // the rest are graph inputs (this fixture's trunk reads its image queue
