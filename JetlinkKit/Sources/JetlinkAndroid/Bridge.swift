@@ -192,7 +192,9 @@
       do {
         server = try EmbeddedServer(
           configuration: configuration, backend: backend, gadget: gadget,
-          hooks: ServerHooks(thermal: { Host.shared.thermal }, auxBenchmark: AuxBenchmarkModel.carrot))
+          hooks: ServerHooks(
+            thermal: { Host.shared.thermal }, auxBenchmark: AuxBenchmarkModel.carrot,
+            benchmarkChecks: (config["benchmark_checks"] as? Bool) ?? true))
         state.reset()
         let events = server.events
         let state = self.state

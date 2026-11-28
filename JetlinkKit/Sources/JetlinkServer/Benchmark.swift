@@ -135,7 +135,8 @@ extension EngineHost {
       let cpuAtStart = processCPUSeconds()
       let report = try measure(l, seconds: seconds, run: run)
       let cpuAlone = (processCPUSeconds() - cpuAtStart) / max(report.seconds, 0.001)
-      if !report.cancelled {
+      // The main Android app stops at the plain run.
+      if !report.cancelled && hooks.benchmarkChecks {
         // The auxiliary camera models beside the driving model, while the
         // device is as warm as the run just left it.
         // Half the plain run, at most 30 s: a minute's benchmark gives them 30 s.
@@ -147,7 +148,7 @@ extension EngineHost {
           log.error("benchmark: aux: failed: \(error)")
         }
       }
-      if !report.cancelled && !run.cancelled {
+      if !report.cancelled && !run.cancelled && hooks.benchmarkChecks {
         let started = ProcessInfo.processInfo.systemUptime
         let directory = cache.layout.root.appending(path: "npu-sweep", directoryHint: .isDirectory)
         let model = try? cache.modelPath(l.sha256)

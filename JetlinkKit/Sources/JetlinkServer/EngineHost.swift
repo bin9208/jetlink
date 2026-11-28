@@ -145,9 +145,9 @@ public final class EngineHost: @unchecked Sendable {
   weak var fetcher: (any ModelFetching)?
   /// Carrot's auxiliary camera models, when the backend can run them.
   let aux: AuxHub?
-  /// Frames from the comma's drives, for the benchmark's CPU comparison.
-  /// Under `lock`.
-  let roadFrames: RoadFrames
+  /// Frames from the comma's drives, for the benchmark's CPU comparison;
+  /// nil without `hooks.benchmarkChecks`. Under `lock`.
+  let roadFrames: RoadFrames?
   /// The frames' NOO maneuver, for the app's badge. Its own lock.
   let noo = NooWatch()
 
@@ -158,7 +158,14 @@ public final class EngineHost: @unchecked Sendable {
     self.hooks = hooks
     telemetry = TelemetrySampler(source: hooks.telemetry)
     picks = PickStore(layout: cache.layout)
-    roadFrames = RoadFrames(directory: cache.layout.root.appending(path: "road-frames", directoryHint: .isDirectory))
+    let roadFramesDirectory = cache.layout.root.appending(path: "road-frames", directoryHint: .isDirectory)
+    if hooks.benchmarkChecks {
+      roadFrames = RoadFrames(directory: roadFramesDirectory)
+    } else {
+      roadFrames = nil
+      // what an earlier version kept (15.7 MB a model), off the start
+      DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: roadFramesDirectory) }
+    }
     aux = cache.backend.aux.map {
       AuxHub(backend: $0, directory: cache.layout.root.appending(path: "aux", directoryHint: .isDirectory), thermal: hooks.thermal)
     }

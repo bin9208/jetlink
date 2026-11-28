@@ -11,6 +11,12 @@ import Foundation
 /// the last `count` of them, and written to the cache now and then and when
 /// the comma goes. They never leave the phone; a benchmark of the same model
 /// compares on them as well as on its random frames.
+///
+/// The write is 40 frames of N16 (15.7 MB) and took 80-170 ms on phones and
+/// tablets. Done in the frame path it held that frame's reply every
+/// `saveInterval`, the comma lost one or two frames, and a 171 ms gap set off
+/// locationd's softDisable on an EV6 (carrot.56). So the frame path only
+/// hands the frames over; `writer` builds and writes the file.
 final class RoadFrames {
   static let count = ReferenceComparison.frames
   static let every = 60
@@ -29,6 +35,8 @@ final class RoadFrames {
   private var seen = 0
   private var dirty = false
   private var savedAt: TimeInterval = 0
+  /// Serial, so writes land in the order they were asked for.
+  private let writer = DispatchQueue(label: "jetlink.roadframes", qos: .utility)
 
   init(directory: URL) {
     self.directory = directory
@@ -62,12 +70,29 @@ final class RoadFrames {
     }
   }
 
-  /// Writes the frames held, if a full set changed since the last write.
+  /// Writes the frames held, if a full set changed since the last write, on
+  /// `writer`: the caller (the frame path, under the host's lock) only copies
+  /// the array, which shares the frames' storage.
   func save() {
-    guard dirty, frames.count == RoadFrames.count, let first = frames.first else { return }
+    guard dirty, frames.count == RoadFrames.count else { return }
     dirty = false
     savedAt = ProcessInfo.processInfo.systemUptime
+    let frames = self.frames
+    let url = RoadFrames.file(in: directory, sha256: sha256)
+    let directory = self.directory
+    writer.async { RoadFrames.write(frames, to: url, in: directory) }
+  }
+
+  /// Returns once every write asked for so far is on disk (or failed).
+  func waitForWrites() {
+    writer.sync {}
+  }
+
+  private static func write(_ frames: [Frame], to url: URL, in directory: URL) {
+    guard let first = frames.first else { return }
+    let started = DispatchTime.now().uptimeNanoseconds
     var data = Data()
+    data.reserveCapacity(16 + frames.count * (first.warped.count + first.packed.count))
     func put(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
     put(RoadFrames.magic)
     put(UInt32(frames.count))
@@ -79,7 +104,9 @@ final class RoadFrames {
     }
     do {
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-      try data.write(to: RoadFrames.file(in: directory, sha256: sha256), options: .atomic)
+      try data.write(to: url, options: .atomic)
+      let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6
+      ServerLog(category: "server").info("road frames: \(frames.count) written in \(Int(ms)) ms, off the frame path")
     } catch {
       ServerLog(category: "server").error("road frames: not written: \(error)")
     }

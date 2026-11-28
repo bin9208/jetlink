@@ -356,10 +356,21 @@ private fun Performance(values: SettingsValues, info: SettingsInfo, actions: Set
     if (values.processor.resolved().usesQnn && offered.isNotEmpty()) {
         FormSection(
             "NPU 실험 (시험 기능)",
-            footer = { FormFooter("바꾸면 서버가 다시 시작되고 켠 것으로 주행 모델을 다시 만듭니다(처음 한 번 1~2분). 벤치마크 뒤에는 각 실험을 따로 만들어 속도와 CPU 대비 정확도를 로그에 남깁니다(몇 분 걸림). 한 번 주행한 뒤 벤치마크하면 그 주행의 도로 프레임으로도 비교합니다(프레임은 이 기기에만 저장).") },
+            footer = {
+                FormFooter(
+                    if (io.zoompilot.jetlink.BuildConfig.CHANNEL == "test") {
+                        "바꾸면 서버가 다시 시작되고 켠 것으로 주행 모델을 다시 만듭니다(처음 한 번 1~2분). 벤치마크 뒤에는 각 실험을 따로 만들어 속도와 CPU 대비 정확도를 로그에 남깁니다(몇 분 걸림). 한 번 주행한 뒤 벤치마크하면 그 주행의 도로 프레임으로도 비교합니다(프레임은 이 기기에만 저장)."
+                    } else {
+                        "바꾸면 서버가 다시 시작되고 켠 것으로 주행 모델을 다시 만듭니다(처음 한 번 1~2분). 실험별 비교는 테스트 앱에서 합니다."
+                    },
+                )
+            },
         ) {
-            ActionRow("도로 프레임 가져오기", actions.importRoadFrames)
-            RowDivider()
+            // the main app keeps no road frames and compares nothing after a benchmark
+            if (io.zoompilot.jetlink.BuildConfig.CHANNEL == "test") {
+                ActionRow("도로 프레임 가져오기", actions.importRoadFrames)
+                RowDivider()
+            }
             offered.forEachIndexed { i, (id, title, about) ->
                 if (i > 0) RowDivider()
                 SwitchRow(

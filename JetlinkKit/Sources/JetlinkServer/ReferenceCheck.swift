@@ -175,7 +175,9 @@ extension EngineHost {
         return ["accelerator against the CPU: the engine was unloaded"]
       }
       // and on frames of the comma's own drives, which reach what a road
-      // does and random bytes do not, when this phone has kept some
+      // does and random bytes do not, when this phone has kept some (a write
+      // the last drive left in flight lands first)
+      roadFrames?.waitForWrites()
       let road = RoadFrames.loadAny(in: roadFramesDirectory, sha256: l.sha256, spec: spec)
       let roadLabel = road?.imported == true ? "imported road frames" : "road frames"
       var onRoad: ReferenceComparison? = nil

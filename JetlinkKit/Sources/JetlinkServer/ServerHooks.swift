@@ -37,6 +37,11 @@ public struct ServerHooks: Sendable {
   /// as a comma would send them (`AuxBenchmarkModel.carrot`); none, it runs
   /// the driving model alone.
   public var auxBenchmark: [AuxBenchmarkModel]
+  /// The benchmark's checks after its plain run (the auxiliary models beside
+  /// it, the NPU experiment sweep, the CPU comparison) and the road frames
+  /// kept from drives for that comparison. Off in the main Android app: it
+  /// benchmarks the plain run only and keeps no frames.
+  public var benchmarkChecks: Bool
 
   public init(
     telemetry: @escaping @Sendable () -> [String: Any] = { [:] },
@@ -45,7 +50,8 @@ public struct ServerHooks: Sendable {
     gadgetIdle: (@Sendable (GadgetIdleEvent) -> Bool)? = nil,
     shutdown: (@Sendable (_ reason: String) -> (@Sendable () -> Void)?)? = nil,
     fatal: (@Sendable (any Error) -> Void)? = nil,
-    auxBenchmark: [AuxBenchmarkModel] = []
+    auxBenchmark: [AuxBenchmarkModel] = [],
+    benchmarkChecks: Bool = true
   ) {
     self.telemetry = telemetry
     self.thermal = thermal
@@ -54,5 +60,6 @@ public struct ServerHooks: Sendable {
     self.shutdown = shutdown
     self.fatal = fatal
     self.auxBenchmark = auxBenchmark
+    self.benchmarkChecks = benchmarkChecks
   }
 }

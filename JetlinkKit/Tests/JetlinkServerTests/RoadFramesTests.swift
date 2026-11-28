@@ -30,11 +30,13 @@ import Testing
     // too few kept frames: nothing written
     for i in 0..<(RoadFrames.every * 3) { offer(r, sha, UInt8(i / RoadFrames.every)) }
     r.save()
+    r.waitForWrites()
     #expect(RoadFrames.load(in: dir, sha256: sha, spec: spec) == nil)
     // more than `count` kept: the oldest go
     let kept = RoadFrames.count + 5
     for i in (RoadFrames.every * 3)..<(RoadFrames.every * (kept + 3)) { offer(r, sha, UInt8(truncatingIfNeeded: i / RoadFrames.every)) }
     r.save()
+    r.waitForWrites()
     let frames = try #require(RoadFrames.load(in: dir, sha256: sha, spec: spec))
     #expect(frames.count == RoadFrames.count)
     // the frame offered at i = every*k - 1 carries k - 1; the last kept is k = kept + 3
@@ -52,6 +54,7 @@ import Testing
     let r = RoadFrames(directory: dir)
     for i in 0..<(RoadFrames.every * RoadFrames.count) { offer(r, sha, UInt8(truncatingIfNeeded: i)) }
     r.save()
+    r.waitForWrites()
     #expect(RoadFrames.load(in: dir, sha256: sha, spec: spec) != nil)
     let other = ModelSpec(
       sha256: "", nbytes: 0, frameSkip: 4,

@@ -97,6 +97,8 @@ class ServerController(private val context: Context, private val scope: Coroutin
         put("experiments", kotlinx.serialization.json.JsonArray(
             settings.experiments.filter { id -> offered.any { it.first == id } }.sorted().map { kotlinx.serialization.json.JsonPrimitive(it) }))
         put("experiment_sweep", offered.isNotEmpty())
+        // the main app benchmarks the plain run only and keeps no road frames (carrot.64)
+        put("benchmark_checks", io.zoompilot.jetlink.BuildConfig.CHANNEL == "test")
         put("port", settings.port)
         // Bench tools reach the server over Wi-Fi or `adb forward`; the comma
         // comes over USB.
